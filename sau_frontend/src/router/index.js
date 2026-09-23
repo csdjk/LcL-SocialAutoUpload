@@ -1,5 +1,6 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
 import Dashboard from '../views/Dashboard.vue'
+import DailyPublish from '../views/DailyPublish.vue'
 import AccountManagement from '../views/AccountManagement.vue'
 import MaterialManagement from '../views/MaterialManagement.vue'
 import PublishCenter from '../views/PublishCenter.vue'
@@ -8,6 +9,11 @@ import About from '../views/About.vue'
 const routes = [
   {
     path: '/',
+    name: 'DailyPublish',
+    component: DailyPublish
+  },
+  {
+    path: '/dashboard',
     name: 'Dashboard',
     component: Dashboard
   },

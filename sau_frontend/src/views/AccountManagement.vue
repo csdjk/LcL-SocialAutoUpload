@@ -19,7 +19,7 @@
               />
               <div class="action-buttons">
                 <el-button type="primary" @click="handleAddAccount">添加账号</el-button>
-                <el-button type="info" @click="fetchAccounts" :loading="false">
+                <el-button type="info" @click="fetchAccounts" :loading="appStore.isAccountRefreshing">
                   <el-icon :class="{ 'is-loading': appStore.isAccountRefreshing }"><Refresh /></el-icon>
                   <span v-if="appStore.isAccountRefreshing">刷新中</span>
                 </el-button>
@@ -89,7 +89,7 @@
               />
               <div class="action-buttons">
                 <el-button type="primary" @click="handleAddAccount">添加账号</el-button>
-                <el-button type="info" @click="fetchAccounts" :loading="false">
+                <el-button type="info" @click="fetchAccounts" :loading="appStore.isAccountRefreshing">
                   <el-icon :class="{ 'is-loading': appStore.isAccountRefreshing }"><Refresh /></el-icon>
                   <span v-if="appStore.isAccountRefreshing">刷新中</span>
                 </el-button>
@@ -159,7 +159,7 @@
               />
               <div class="action-buttons">
                 <el-button type="primary" @click="handleAddAccount">添加账号</el-button>
-                <el-button type="info" @click="fetchAccounts" :loading="false">
+                <el-button type="info" @click="fetchAccounts" :loading="appStore.isAccountRefreshing">
                   <el-icon :class="{ 'is-loading': appStore.isAccountRefreshing }"><Refresh /></el-icon>
                   <span v-if="appStore.isAccountRefreshing">刷新中</span>
                 </el-button>
@@ -229,7 +229,7 @@
               />
               <div class="action-buttons">
                 <el-button type="primary" @click="handleAddAccount">添加账号</el-button>
-                <el-button type="info" @click="fetchAccounts" :loading="false">
+                <el-button type="info" @click="fetchAccounts" :loading="appStore.isAccountRefreshing">
                   <el-icon :class="{ 'is-loading': appStore.isAccountRefreshing }"><Refresh /></el-icon>
                   <span v-if="appStore.isAccountRefreshing">刷新中</span>
                 </el-button>
@@ -299,7 +299,7 @@
               />
               <div class="action-buttons">
                 <el-button type="primary" @click="handleAddAccount">添加账号</el-button>
-                <el-button type="info" @click="fetchAccounts" :loading="false">
+                <el-button type="info" @click="fetchAccounts" :loading="appStore.isAccountRefreshing">
                   <el-icon :class="{ 'is-loading': appStore.isAccountRefreshing }"><Refresh /></el-icon>
                   <span v-if="appStore.isAccountRefreshing">刷新中</span>
                 </el-button>
@@ -390,14 +390,14 @@
         </el-form-item>
         
         <!-- 二维码显示区域 -->
-        <div v-if="sseConnecting" class="qrcode-container">
+        <div v-if="sseConnecting || loginStatus" class="qrcode-container">
           <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
-            <p class="qrcode-tip">请使用对应平台APP扫描二维码登录</p>
-            <img :src="qrCodeData" alt="登录二维码" class="qrcode-image" />
+            <p class="qrcode-tip">{{ loginProgress || '请使用对应平台APP扫码，并在手机上确认' }}</p>
+            <img :src="qrCodeData" alt="登录二维码" class="qrcode-image" @error="failLogin('二维码图片加载失败，请重试')" />
           </div>
           <div v-else-if="!qrCodeData && !loginStatus" class="loading-wrapper">
             <el-icon class="is-loading"><Refresh /></el-icon>
-            <span>请求中...</span>
+            <span>{{ loginProgress || '正在获取登录二维码…' }}</span>
           </div>
           <div v-else-if="loginStatus === '200'" class="success-wrapper">
             <el-icon><CircleCheckFilled /></el-icon>
@@ -405,7 +405,7 @@
           </div>
           <div v-else-if="loginStatus === '500'" class="error-wrapper">
             <el-icon><CircleCloseFilled /></el-icon>
-            <span>添加失败，请稍后再试</span>
+            <span>{{ loginError }}</span>
           </div>
         </div>
       </el-form>
@@ -416,9 +416,9 @@
             type="primary" 
             @click="submitAccountForm" 
             :loading="sseConnecting" 
-            :disabled="sseConnecting"
+            :disabled="sseConnecting || loginStatus === '200'"
           >
-            {{ sseConnecting ? '请求中' : '确认' }}
+            {{ loginStatus === '200' ? '已成功' : sseConnecting ? (qrCodeData ? '等待登录' : '获取二维码') : loginStatus === '500' ? '重试' : '确认' }}
           </el-button>
         </span>
       </template>
@@ -427,10 +427,11 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { Refresh, CircleCheckFilled, CircleCloseFilled, Download, Upload, Loading } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { accountApi } from '@/api/account'
+import { createLoginStream } from '@/utils/loginStream'
 import { useAccountStore } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { http } from '@/utils/request'
@@ -446,75 +447,34 @@ const activeTab = ref('all')
 // 搜索关键词
 const searchKeyword = ref('')
 
-// 获取账号数据（快速，不验证）
+// 列表立即显示上次保存的状态；校验进度不再覆盖账号状态。
 const fetchAccountsQuick = async () => {
   try {
-    const res = await accountApi.getAccounts()
-    if (res.code === 200 && res.data) {
-      // 将所有账号的状态暂时设为"验证中"
-      const accountsWithPendingStatus = res.data.map(account => {
-        const updatedAccount = [...account];
-        updatedAccount[4] = -1; // -1 表示验证中的临时状态
-        return updatedAccount;
-      });
-      accountStore.setAccounts(accountsWithPendingStatus);
-    }
+    await accountStore.loadAccounts()
+    appStore.setAccountManagementVisited()
   } catch (error) {
-    console.error('快速获取账号数据失败:', error)
+    ElMessage.error(accountStore.loadError || '获取账号列表失败')
   }
 }
 
-// 获取账号数据（带验证）
+// 手动刷新时再校验。账号添加成功后已经校验过，无需重复打开浏览器。
 const fetchAccounts = async () => {
   if (appStore.isAccountRefreshing) return
-
   appStore.setAccountRefreshing(true)
-
   try {
-    const res = await accountApi.getValidAccounts()
-    if (res.code === 200 && res.data) {
-      accountStore.setAccounts(res.data)
-      ElMessage.success('账号数据获取成功')
-      // 标记为已访问
-      if (appStore.isFirstTimeAccountManagement) {
-        appStore.setAccountManagementVisited()
-      }
-    } else {
-      ElMessage.error('获取账号数据失败')
-    }
+    await accountStore.loadAccounts()
+    await accountStore.validateAccounts()
+    appStore.setAccountManagementVisited()
+    if (accountStore.validationError) ElMessage.warning(accountStore.validationError)
+    else ElMessage.success('账号状态已更新')
   } catch (error) {
-    console.error('获取账号数据失败:', error)
-    ElMessage.error('获取账号数据失败')
+    ElMessage.warning(accountStore.validationError || accountStore.loadError || '获取账号数据失败')
   } finally {
     appStore.setAccountRefreshing(false)
   }
 }
 
-// 后台验证所有账号（优化版本，使用setTimeout避免阻塞UI）
-const validateAllAccountsInBackground = async () => {
-  // 使用setTimeout将验证过程放在下一个事件循环，避免阻塞UI
-  setTimeout(async () => {
-    try {
-      const res = await accountApi.getValidAccounts()
-      if (res.code === 200 && res.data) {
-        accountStore.setAccounts(res.data)
-      }
-    } catch (error) {
-      console.error('后台验证账号失败:', error)
-    }
-  }, 0)
-}
-
-// 页面加载时获取账号数据
-onMounted(() => {
-  // 快速获取账号列表（不验证），立即显示
-  fetchAccountsQuick()
-
-  // 在后台验证所有账号
-  setTimeout(() => {
-    validateAllAccountsInBackground()
-  }, 100) // 稍微延迟一下，让用户看到快速加载的效果
-})
+onMounted(fetchAccountsQuick)
 
 // 获取平台标签类型
 const getPlatformTagType = (platform) => {
@@ -604,6 +564,8 @@ const rules = {
 const sseConnecting = ref(false)
 const qrCodeData = ref('')
 const loginStatus = ref('')
+const loginError = ref('')
+const loginProgress = ref('')
 
 // 添加账号
 const handleAddAccount = () => {
@@ -760,113 +722,73 @@ const getDefaultAvatar = (name) => {
   return `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=random`
 }
 
-// SSE事件源对象
-let eventSource = null
+// 登录连接和成功提示定时器只属于当前对话框。
+let loginStream = null
+let successTimer = null
 
-// 关闭SSE连接
 const closeSSEConnection = () => {
-  if (eventSource) {
-    eventSource.close()
-    eventSource = null
+  loginStream?.close()
+  loginStream = null
+  if (successTimer !== null) {
+    clearTimeout(successTimer)
+    successTimer = null
   }
 }
 
-// 建立SSE连接
-const connectSSE = (platform, name) => {
-  // 关闭可能存在的连接
+const failLogin = (message) => {
   closeSSEConnection()
+  loginStatus.value = '500'
+  loginError.value = message
+  sseConnecting.value = false
+}
 
-  // 设置连接状态
+watch(dialogVisible, (visible) => {
+  if (!visible) {
+    closeSSEConnection()
+    sseConnecting.value = false
+    qrCodeData.value = ''
+    loginStatus.value = ''
+    loginError.value = ''
+    loginProgress.value = ''
+  }
+})
+
+const connectSSE = (platform, name) => {
+  closeSSEConnection()
   sseConnecting.value = true
   qrCodeData.value = ''
   loginStatus.value = ''
+  loginError.value = ''
+  loginProgress.value = '正在获取登录二维码…'
 
-  // 获取平台类型编号
-  const platformTypeMap = {
-    '小红书': '1',
-    '视频号': '2',
-    '抖音': '3',
-    '快手': '4'
+  const type = { '小红书': '1', '视频号': '2', '抖音': '3', '快手': '4' }[platform]
+  if (!type) {
+    failLogin('平台类型无效，请重新选择')
+    return
   }
-
-  const type = platformTypeMap[platform] || '1'
-
-  // 创建SSE连接
   const baseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409'
-  const url = `${baseUrl}/login?type=${type}&id=${encodeURIComponent(name)}`
-
-  eventSource = new EventSource(url)
-
-  // 监听消息
-  eventSource.onmessage = (event) => {
-    const data = event.data
-
-    // 如果还没有二维码数据，且数据长度较长，认为是二维码
-    if (!qrCodeData.value && data.length > 100) {
-      try {
-        if (data.startsWith('data:image')) {
-          qrCodeData.value = data
-        } else {
-          qrCodeData.value = `data:image/png;base64,${data}`
-        }
-      } catch (error) {
-        // 处理二维码数据出错
-      }
+  const url = `${baseUrl}/login?type=${type}&id=${encodeURIComponent(name.trim())}`
+  loginStream = createLoginStream(url, {
+    onQr: (image) => {
+      qrCodeData.value = image
+      loginProgress.value = platform === '视频号'
+        ? '请使用微信扫一扫，扫码后在手机上确认'
+        : '请使用对应平台APP扫码，并在手机上确认'
+    },
+    onStatus: ({ message }) => { loginProgress.value = message },
+    onError: failLogin,
+    onSuccess: () => {
+      loginStream = null
+      loginStatus.value = '200'
+      sseConnecting.value = false
+      successTimer = setTimeout(() => {
+        successTimer = null
+        dialogVisible.value = false
+        ElMessage.success('账号登录成功')
+        fetchAccountsQuick()
+      }, 800)
     }
-    // 如果收到状态码
-    else if (data === '200' || data === '500') {
-      loginStatus.value = data
-
-      // 如果登录成功
-      if (data === '200') {
-        setTimeout(() => {
-          // 关闭连接
-          closeSSEConnection()
-
-          // 1秒后关闭对话框并开始刷新
-          setTimeout(() => {
-            dialogVisible.value = false
-            sseConnecting.value = false
-
-            // 根据是否是重新登录显示不同提示
-            ElMessage.success(dialogType.value === 'edit' ? '重新登录成功' : '账号添加成功')
-
-            // 显示更新账号信息提示
-            ElMessage({
-              type: 'info',
-              message: '正在同步账号信息...',
-              duration: 0
-            })
-
-            // 触发刷新操作
-            fetchAccounts().then(() => {
-              // 刷新完成后关闭提示
-              ElMessage.closeAll()
-              ElMessage.success('账号信息已更新')
-            })
-          }, 1000)
-        }, 1000)
-      } else {
-        // 登录失败，关闭连接
-        closeSSEConnection()
-
-        // 2秒后重置状态，允许重试
-        setTimeout(() => {
-          sseConnecting.value = false
-          qrCodeData.value = ''
-          loginStatus.value = ''
-        }, 2000)
-      }
-    }
-  }
-
-  // 监听错误
-  eventSource.onerror = (error) => {
-    console.error('SSE连接错误:', error)
-    ElMessage.error('连接服务器失败，请稍后再试')
-    closeSSEConnection()
-    sseConnecting.value = false
-  }
+  })
 }
 
 // 提交账号表单
@@ -1049,6 +971,11 @@ onBeforeUnmount(() => {
     
     .error-wrapper .el-icon {
       color: #f56c6c;
+    }
+
+    .error-wrapper span {
+      text-align: center;
+      line-height: 1.5;
     }
   }
 }

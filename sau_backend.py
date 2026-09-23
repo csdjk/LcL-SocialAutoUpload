@@ -1,20 +1,23 @@
 import asyncio
+import json
 import os
+import re
 import sqlite3
 import threading
 import time
 import uuid
 from pathlib import Path
-from queue import Queue
+from myUtils.login_session import LoginStatusQueue, run_login, sse_stream
 from flask_cors import CORS
 from myUtils.auth import check_cookie
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from myUtils.account_validation import validate_accounts
+from flask import Flask, request, jsonify, Response, render_template, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+import daily_publish as daily
 
-active_queues = {}
 app = Flask(__name__)
 
 #允许所有来源跨域访问
@@ -227,36 +230,10 @@ def getAccounts():
         }), 500
 
 
-@app.route("/getValidAccounts",methods=['GET'])
+@app.route("/getValidAccounts", methods=['GET'])
 async def getValidAccounts():
-    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
-        cursor = conn.cursor()
-        cursor.execute('''
-        SELECT * FROM user_info''')
-        rows = cursor.fetchall()
-        rows_list = [list(row) for row in rows]
-        print("\n📋 当前数据表内容：")
-        for row in rows:
-            print(row)
-        for row in rows_list:
-            flag = await check_cookie(row[1],row[2])
-            if not flag:
-                row[4] = 0
-                cursor.execute('''
-                UPDATE user_info 
-                SET status = ? 
-                WHERE id = ?
-                ''', (0,row[0]))
-                conn.commit()
-                print("✅ 用户状态已更新")
-        for row in rows:
-            print(row)
-        return jsonify(
-                        {
-                            "code": 200,
-                            "msg": None,
-                            "data": rows_list
-                        }),200
+    rows, errors = await validate_accounts(Path(BASE_DIR) / 'db' / 'database.db', check_cookie)
+    return jsonify({'code': 200, 'msg': None, 'data': rows, 'validation_errors': errors}), 200
 
 @app.route('/deleteFile', methods=['GET'])
 def delete_file():
@@ -387,22 +364,19 @@ def login():
     type = request.args.get('type')
     # 账号名
     id = request.args.get('id')
+    if type not in {'1', '2', '3', '4'} or not id or not id.strip():
+        return jsonify({'code': 400, 'msg': '平台或账号名称无效'}), 400
 
-    # 模拟一个用于异步通信的队列
-    status_queue = Queue()
-    active_queues[id] = status_queue
-
-    def on_close():
-        print(f"清理队列: {id}")
-        del active_queues[id]
+    status_queue = LoginStatusQueue()
     # 启动异步任务线程
     thread = threading.Thread(target=run_async_function, args=(type,id,status_queue), daemon=True)
     thread.start()
-    response = Response(sse_stream(status_queue,), mimetype='text/event-stream')
+    response = Response(sse_stream(status_queue), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
     response.headers['Connection'] = 'keep-alive'
+    response.call_on_close(status_queue.cancelled.set)
     return response
 
 @app.route('/postVideo', methods=['POST'])
@@ -687,37 +661,88 @@ def download_cookie():
 
 # 包装函数：在线程中运行异步函数
 def run_async_function(type,id,status_queue):
-    match type:
-        case '1':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(xiaohongshu_cookie_gen(id, status_queue))
-            loop.close()
-        case '2':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(get_tencent_cookie(id,status_queue))
-            loop.close()
-        case '3':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(douyin_cookie_gen(id,status_queue))
-            loop.close()
-        case '4':
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(get_ks_cookie(id,status_queue))
-            loop.close()
+    login_functions = {
+        '1': xiaohongshu_cookie_gen,
+        '2': get_tencent_cookie,
+        '3': douyin_cookie_gen,
+        '4': get_ks_cookie,
+    }
+    run_login(login_functions[type], id, status_queue, logger=app.logger)
 
-# SSE 流生成器函数
-def sse_stream(status_queue):
-    while True:
-        if not status_queue.empty():
-            msg = status_queue.get()
-            yield f"data: {msg}\n\n"
-        else:
-            # 避免 CPU 占满
-            time.sleep(0.1)
+
+def _daily_error(error):
+    return jsonify({"code": 400, "msg": str(error), "data": None}), 400
+
+
+@app.route('/daily/today', methods=['GET'])
+def daily_today():
+    try:
+        daily.import_legacy(daily.output_root().parent / 'publications.json')
+        path, package, errors = daily.find_today()
+        if not package:
+            return jsonify({"code": 200, "data": {"package_path": None, "package": None,
+                                                  "status": {}, "errors": errors}})
+        drafts = {}
+        statuses = daily.status_for(package)
+        for platform, item in statuses.items():
+            aid = str(item['account'].get('account_id', ''))
+            drafts[platform] = daily.get_draft(path, platform, aid) if aid else None
+        return jsonify({"code": 200, "data": {"package_path": str(path), "package": package,
+                                              "status": statuses, "drafts": drafts, "errors": errors}})
+    except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/asset/<date>/<revision>/<key>', methods=['GET'])
+def daily_asset(date, revision, key):
+    try:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', date) or not re.fullmatch(r'r\d{3}', revision):
+            raise ValueError('资源包日期或版本无效')
+        path = daily.output_root() / date / revision / 'package.json'
+        package = daily.load_package(path)
+        asset = package['assets'][key]
+        return send_file(path.parent / asset['path'], conditional=True)
+    except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/draft', methods=['PUT'])
+def daily_draft():
+    try:
+        body = request.get_json(force=True)
+        result = daily.save_draft(Path(body['package_path']), body['platform'],
+                                  str(body['account_id']), body['payload'])
+        return jsonify({"code": 200, "data": result})
+    except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/submit', methods=['POST'])
+def daily_submit():
+    try:
+        body = request.get_json(force=True)
+        result = daily.submit(Path(body['package_path']), body['platforms'], 'manual')
+        return jsonify({"code": 200, "data": result})
+    except (ValueError, KeyError, OSError, json.JSONDecodeError, TypeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/task/<job_id>', methods=['GET'])
+def daily_task(job_id):
+    try:
+        return jsonify({"code": 200, "data": daily.task(job_id)})
+    except ValueError as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/reconcile', methods=['POST'])
+def daily_reconcile():
+    try:
+        body = request.get_json(force=True)
+        return jsonify({"code": 200, "data": daily.reconcile(body['task_id'], body['state'], body['evidence'])})
+    except (ValueError, KeyError, TypeError) as error:
+        return _daily_error(error)
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0' ,port=5409)
+    app.run(host='127.0.0.1', port=5409)

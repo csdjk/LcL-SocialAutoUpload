@@ -251,22 +251,32 @@
 
           <!-- 账号选择弹窗 -->
           <el-dialog
+            v-if="currentTab?.name === tab.name"
             v-model="accountDialogVisible"
             title="选择账号"
             width="600px"
             class="account-dialog"
           >
-            <div class="account-dialog-content">
+            <div class="account-dialog-content" v-loading="accountStore.isLoading" element-loading-text="正在加载账号…">
+              <p>{{ currentPlatformName }}账号</p>
+              <el-alert v-if="accountStore.loadError" :title="accountStore.loadError" type="error" show-icon :closable="false" />
+              <el-empty v-if="!accountStore.isLoading && !availableAccounts.length"
+                :description="accountStore.loadError ? '账号加载失败，请点击刷新重试' : `暂无${currentPlatformName}账号，请先在账号管理添加`"
+                :image-size="70" />
               <el-checkbox-group v-model="tempSelectedAccounts">
                 <div class="account-list">
                   <el-checkbox
                     v-for="account in availableAccounts"
                     :key="account.id"
-                    :label="account.id"
+                    :value="account.id"
+                    :disabled="account.status !== '正常'"
                     class="account-item"
                   >
                     <div class="account-info">
-                      <span class="account-name">{{ account.name }}</span>                      
+                      <span class="account-name">{{ account.name }}</span>
+                      <el-tag size="small" :type="account.status === '正常' ? 'success' : 'warning'" style="margin-left: 12px">
+                        {{ account.status === '异常' ? '需重新登录' : account.status }}
+                      </el-tag>
                     </div>
                   </el-checkbox>
                 </div>
@@ -275,8 +285,10 @@
 
             <template #footer>
               <div class="dialog-footer">
+                <el-button @click="refreshAccountList" :loading="accountStore.isLoading">刷新账号</el-button>
                 <el-button @click="accountDialogVisible = false">取消</el-button>
-                <el-button type="primary" @click="confirmAccountSelection">确定</el-button>
+                <el-button type="primary" @click="confirmAccountSelection"
+                  :disabled="accountStore.isLoading || !!accountStore.loadError || !tempSelectedAccounts.length">确定</el-button>
               </div>
             </template>
           </el-dialog>
@@ -284,11 +296,11 @@
           <!-- 平台选择 -->
           <div class="platform-section">
             <h3>平台</h3>
-            <el-radio-group v-model="tab.selectedPlatform" class="platform-radios">
+            <el-radio-group v-model="tab.selectedPlatform" class="platform-radios" @change="handlePlatformChange(tab)">
               <el-radio 
                 v-for="platform in platforms" 
                 :key="platform.key"
-                :label="platform.key"
+                :value="platform.key"
                 class="platform-radio"
               >
                 {{ platform.name }}
@@ -491,10 +503,10 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { Upload, Plus, Close, Folder } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import { useAccountStore } from '@/stores/account'
+import { useAccountStore, platformTypes, selectableAccountIds } from '@/stores/account'
 import { useAppStore } from '@/stores/app'
 import { materialApi } from '@/api/material'
 import { http } from '@/utils/request'
@@ -581,17 +593,27 @@ const currentTab = ref(null)
 // 获取账号状态管理
 const accountStore = useAccountStore()
 
-// 根据选择的平台获取可用账号列表
-const availableAccounts = computed(() => {
-  const platformMap = {
-    3: '抖音',
-    2: '视频号',
-    1: '小红书',
-    4: '快手'
+const currentPlatformName = computed(() => platformTypes[Number(currentTab.value?.selectedPlatform)] || '')
+const availableAccounts = computed(() => accountStore.accounts.filter(account =>
+  account.type === Number(currentTab.value?.selectedPlatform)
+))
+
+const refreshAccountList = async () => {
+  try {
+    await accountStore.loadAccounts()
+    if (accountDialogVisible.value && currentTab.value) {
+      tempSelectedAccounts.value = selectableAccountIds(
+        accountStore.accounts, tempSelectedAccounts.value, currentTab.value.selectedPlatform
+      )
+    }
+  } catch (error) {
+    // The dialog shows a retryable error; never silently turn a failure into an empty list.
+    console.error('加载发布账号失败:', error)
   }
-  const currentPlatform = currentTab.value ? platformMap[currentTab.value.selectedPlatform] : null
-  return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
-})
+}
+
+// Works on a fresh browser tab or a direct /publish-center refresh.
+onMounted(refreshAccountList)
 
 // 话题相关状态
 const topicDialogVisible = ref(false)
@@ -728,18 +750,29 @@ const confirmTopicSelection = () => {
 // 打开账号选择弹窗
 const openAccountDialog = (tab) => {
   currentTab.value = tab
-  tempSelectedAccounts.value = [...tab.selectedAccounts]
+  tempSelectedAccounts.value = selectableAccountIds(accountStore.accounts, tab.selectedAccounts, tab.selectedPlatform)
   accountDialogVisible.value = true
+  refreshAccountList()
 }
 
 // 确认账号选择
 const confirmAccountSelection = () => {
-  if (currentTab.value) {
-    currentTab.value.selectedAccounts = [...tempSelectedAccounts.value]
+  if (!currentTab.value || accountStore.isLoading || accountStore.loadError) return
+  const selected = selectableAccountIds(accountStore.accounts, tempSelectedAccounts.value, currentTab.value.selectedPlatform)
+  if (!selected.length) {
+    ElMessage.warning('请选择当前平台的有效账号')
+    return
   }
+  currentTab.value.selectedAccounts = selected
   accountDialogVisible.value = false
   currentTab.value = null
   ElMessage.success('账号选择完成')
+}
+
+// 切换平台不能沿用之前平台的账号，避免向错误平台发送凭据。
+const handlePlatformChange = (tab) => {
+  tab.selectedAccounts = []
+  if (currentTab.value?.name === tab.name) tempSelectedAccounts.value = []
 }
 
 // 删除选中的账号
@@ -789,6 +822,13 @@ const confirmPublish = async (tab) => {
     throw new Error('请选择发布账号')
   }
 
+  const validIds = selectableAccountIds(accountStore.accounts, tab.selectedAccounts, tab.selectedPlatform)
+  if (validIds.length !== tab.selectedAccounts.length) {
+    tab.publishing = false
+    ElMessage.error('所选账号已失效或不属于当前平台，请重新选择')
+    throw new Error('发布账号无效')
+  }
+
   // 构造发布数据，符合后端API格式
   const publishData = {
     type: tab.selectedPlatform,
@@ -813,16 +853,9 @@ const confirmPublish = async (tab) => {
   try {
     const data = await http.post('/postVideo', publishData)
     tab.publishStatus = {
-      message: '发布成功',
-      type: 'success'
+      message: '旧版上传流程已返回；请到平台内容管理核对真实作品与审核状态。',
+      type: 'warning'
     }
-    // 清空当前tab的数据
-    tab.fileList = []
-    tab.displayFileList = []
-    tab.title = ''
-    tab.selectedTopics = []
-    tab.selectedAccounts = []
-    tab.scheduleEnabled = false
   } catch (error) {
     console.error('发布错误:', error)
     tab.publishStatus = {
@@ -957,8 +990,8 @@ const batchPublish = async () => {
         await confirmPublish(tab)
         publishResults.value.push({
           label: tab.label,
-          status: 'success',
-          message: '发布成功'
+          status: 'submitted',
+          message: '旧版流程已返回，待平台远端核对'
         })
       } catch (error) {
         publishResults.value.push({
@@ -973,16 +1006,16 @@ const batchPublish = async () => {
     publishProgress.value = 100
     
     // 统计发布结果
-    const successCount = publishResults.value.filter(r => r.status === 'success').length
+    const submittedCount = publishResults.value.filter(r => r.status === 'submitted').length
     const failCount = publishResults.value.filter(r => r.status === 'error').length
     const cancelCount = publishResults.value.filter(r => r.status === 'cancelled').length
     
     if (isCancelled.value) {
-      ElMessage.warning(`发布已取消：${successCount}个成功，${failCount}个失败，${cancelCount}个未执行`)
+      ElMessage.warning(`批量流程已取消：${submittedCount}个待核对，${failCount}个失败，${cancelCount}个未执行`)
     } else if (failCount > 0) {
-      ElMessage.error(`发布完成：${successCount}个成功，${failCount}个失败`)
+      ElMessage.error(`批量流程结束：${submittedCount}个待核对，${failCount}个失败`)
     } else {
-      ElMessage.success('所有Tab发布成功')
+      ElMessage.warning('所有 Tab 的旧版流程已返回，请逐个平台核对远端结果')
       setTimeout(() => {
         batchPublishDialogVisible.value = false
       }, 1000)

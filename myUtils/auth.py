@@ -41,21 +41,8 @@ async def cookie_auth_douyin(account_file):
 
 
 async def cookie_auth_tencent(account_file):
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
-        context = await browser.new_context(storage_state=account_file)
-        context = await set_init_script(context)
-        # 创建一个新的页面
-        page = await context.new_page()
-        # 访问指定的 URL
-        await page.goto("https://channels.weixin.qq.com/platform/post/create")
-        try:
-            await page.wait_for_selector('div.title-name:has-text("微信小店")', timeout=5000)  # 等待5秒
-            tencent_logger.error("[+] 等待5秒 cookie 失效")
-            return False
-        except:
-            tencent_logger.success("[+] cookie 有效")
-            return True
+    from uploader.tencent_uploader.main import cookie_auth
+    return await cookie_auth(account_file)
 
 
 async def cookie_auth_ks(account_file):

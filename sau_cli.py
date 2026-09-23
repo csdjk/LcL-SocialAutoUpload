@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -169,6 +170,7 @@ class BilibiliVideoUploadRequest:
     tags: list[str]
     publish_date: datetime | int
     thumbnail_file: Path | None = None
+    extra_fields: dict | None = None
 
 
 @dataclass(slots=True)
@@ -189,6 +191,8 @@ class TencentVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     collection_name: str | None = None
+    require_content_label: bool = False
+    require_thumbnail: bool = False
 
 
 @dataclass(slots=True)
@@ -582,6 +586,8 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
         arguments.extend(["--tag", ",".join(request.tags)])
     if request.thumbnail_file:
         arguments.extend(["--cover", str(request.thumbnail_file)])
+    if request.extra_fields:
+        arguments.extend(["--extra-fields", json.dumps(request.extra_fields, ensure_ascii=False)])
     if isinstance(request.publish_date, datetime):
         arguments.extend(["--dtime", str(int(request.publish_date.timestamp()))])
 
@@ -621,6 +627,8 @@ async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        require_content_label=request.require_content_label,
+        require_thumbnail=request.require_thumbnail,
     )
     await app.tencent_upload_video()
     return account_file

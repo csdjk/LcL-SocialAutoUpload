@@ -18,7 +18,11 @@
           >
             <el-menu-item index="/">
               <el-icon><HomeFilled /></el-icon>
-              <span>首页</span>
+              <span>今日待发布</span>
+            </el-menu-item>
+            <el-menu-item index="/dashboard">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>概览</span>
             </el-menu-item>
             <el-menu-item index="/account-management">
               <el-icon><User /></el-icon>
@@ -44,6 +48,7 @@
           <div class="header-content">
             <div class="header-left">
               <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
+              <el-button class="mobile-menu" text @click="mobileNav = true">菜单</el-button>
             </div>
             <div class="header-right">
               <!-- 账号信息已移除 -->
@@ -55,6 +60,15 @@
         </el-main>
       </el-container>
     </el-container>
+    <el-drawer v-model="mobileNav" title="页面导航" direction="ltr" size="min(82vw, 280px)">
+      <el-menu :router="true" :default-active="activeMenu" @select="mobileNav = false">
+        <el-menu-item index="/">今日待发布</el-menu-item>
+        <el-menu-item index="/dashboard">概览</el-menu-item>
+        <el-menu-item index="/account-management">账号管理</el-menu-item>
+        <el-menu-item index="/material-management">素材管理</el-menu-item>
+        <el-menu-item index="/publish-center">发布中心</el-menu-item>
+      </el-menu>
+    </el-drawer>
   </div>
 </template>
 
@@ -75,6 +89,7 @@ const activeMenu = computed(() => {
 
 // 侧边栏折叠状态
 const isCollapse = ref(false)
+const mobileNav = ref(false)
 
 // 切换侧边栏折叠状态
 const toggleSidebar = () => {
@@ -194,5 +209,12 @@ const toggleSidebar = () => {
   background-color: $bg-color-page;
   padding: 20px;
   overflow-y: auto;
+}
+.mobile-menu { display: none; }
+@media (max-width: 700px) {
+  .el-aside { display: none; }
+  .el-main { padding: 12px; }
+  .el-header .header-content .header-left .toggle-sidebar { display: none; }
+  .mobile-menu { display: inline-flex; }
 }
 </style>

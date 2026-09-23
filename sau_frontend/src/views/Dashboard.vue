@@ -284,7 +284,7 @@ onMounted(() => {
 
   .dashboard-content {
     .stat-card {
-      height: 140px;
+      height: 160px;
       margin-bottom: 20px;
 
       .stat-card-content {

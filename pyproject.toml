@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 sau = "sau_cli:main"
+sau-daily = "daily_publish:main"
 
 [project.optional-dependencies]
 web = [
@@ -30,7 +31,7 @@ web = [
 package = true
 
 [tool.setuptools]
-py-modules = ["cli_main", "conf", "sau_cli"]
+py-modules = ["cli_main", "conf", "sau_cli", "daily_publish"]
 include-package-data = true
 
 [tool.setuptools.packages.find]

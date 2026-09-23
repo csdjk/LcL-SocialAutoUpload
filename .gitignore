@@ -182,6 +182,8 @@ package-lock.json
 
 # database
 db/database.db
+db/daily-jobs.db
+db/daily-settings.json
 
 # 临时文件夹
 cookiesFile

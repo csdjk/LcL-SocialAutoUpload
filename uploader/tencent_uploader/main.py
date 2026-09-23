@@ -5,10 +5,11 @@ import asyncio
 import base64
 import inspect
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 from patchright.async_api import Page
 from patchright.async_api import Playwright
@@ -112,6 +113,7 @@ def format_str_for_short_title(origin_title: str) -> str:
 
 
 async def cookie_auth(account_file):
+    """Only accept a rendered, authenticated page; a blank page is not success."""
     account_file = _resolve_account_file(account_file)
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=True))
@@ -119,89 +121,81 @@ async def cookie_auth(account_file):
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto(TENCENT_UPLOAD_URL, wait_until="domcontentloaded")
-
-            # cookie 失效时, 页面先停在 post/create, 随后由前端 JS 跳转到登录页;
-            # 必须等待跳转完成再判断, 否则会误报"cookie 有效"
-            try:
-                await page.wait_for_url("**/login.html**", timeout=8000)
-                tencent_logger.info(_msg("🥹", "cookie 已失效（页面跳转到登录页），得重新登录一下"))
-                return False
-            except Exception:
-                pass  # 8 秒内未跳转, 大概率已登录
-
-            # 双保险: 页面里出现微信扫码登录 iframe 也视为失效
-            for fr in page.frames:
-                if "open.weixin.qq.com/connect/qrconnect" in fr.url:
-                    tencent_logger.info(_msg("🥹", "cookie 已失效（页面出现扫码登录框），得重新登录一下"))
+            await page.goto(TENCENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=30000)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if await _is_tencent_login_completed(page):
+                    tencent_logger.success(_msg("🥳", "cookie 有效"))
+                    return True
+                if "login" in urlsplit(page.url).path or any(
+                    "open.weixin.qq.com/connect/qrconnect" in frame.url for frame in page.frames
+                ):
                     return False
-
-            tencent_logger.success(_msg("🥳", "cookie 有效"))
-            return True
+                await asyncio.sleep(0.5)
+            return False
         except Exception as exc:
-            tencent_logger.warning(_msg("😵", f"cookie 校验时出错，按失效处理: {exc}"))
+            tencent_logger.warning(_msg("😵", f"cookie 校验失败: {exc}"))
             return False
         finally:
             await browser.close()
 
 
-async def _extract_tencent_qrcode_src(page: Page) -> str:
-    if hasattr(page, "frame_locator"):
+async def _qrcode_image_data_url(page: Page, frame, image) -> str:
+    """Resolve relative URLs against the owning frame, not the local Web UI."""
+    src = await image.get_attribute("src", timeout=1000)
+    if not src:
+        raise ValueError("二维码图片尚未加载")
+    if src.startswith("data:image/"):
+        return src
+    absolute_url = urljoin(frame.url, src)
+    parsed = urlsplit(absolute_url)
+    # Fetch only the expected WeChat hosts. Never expose a cookie/proxy endpoint.
+    if parsed.scheme == "https" and parsed.hostname in {"open.weixin.qq.com", "channels.weixin.qq.com"}:
+        response = None
         try:
-            iframe_locator = page.frame_locator('[src*="login-for-iframe"]')
-            qr_code_img = iframe_locator.locator('div#app img.qrcode').first
-            await qr_code_img.wait_for(state="visible", timeout=8000)
-            src = await qr_code_img.get_attribute("src")
-            if src and src.startswith("data:image/"):
-                return src
+            response = await page.context.request.get(absolute_url, timeout=10000, max_redirects=0)
+            content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+            if response.ok and content_type.startswith("image/"):
+                body = await response.body()
+                if body:
+                    return f"data:{content_type};base64,{base64.b64encode(body).decode()}"
         except Exception:
-            pass
+            pass  # Keep the rendered-image fallback available on HTTP failures.
+        finally:
+            if response is not None:
+                await response.dispose()
+    # A rendered image also covers blob URLs and images unavailable to HTTP fetch.
+    if await image.is_visible():
+        body = await image.screenshot(type="png", timeout=2000)
+        return f"data:image/png;base64,{base64.b64encode(body).decode()}"
+    raise RuntimeError("二维码图片下载失败，请重试")
 
-    # 2026 新版登录页: 二维码在 open.weixin.qq.com/connect/qrconnect 的 iframe 里,
-    # img.qrcode 的 src 是相对路径(如 /connect/qrcode/xxxx), 需要下载后转成 data URL
-    for frame in page.frames:
-        if "open.weixin.qq.com/connect/qrconnect" not in frame.url:
-            continue
-        try:
-            qr_img = frame.locator("img.qrcode").first
-            await qr_img.wait_for(state="attached", timeout=15000)
-            src = None
-            for _ in range(20):
-                src = await qr_img.get_attribute("src")
-                if src:
-                    break
-                await page.wait_for_timeout(500)
-            if not src:
+
+async def _extract_tencent_qrcode_src(page: Page, timeout: float = 45) -> str:
+    deadline = time.monotonic() + timeout
+    selector = 'img.qrcode, img.js_qrcode_img, img.web_qrcode_img, img[src*="/connect/qrcode/"]'
+    while time.monotonic() < deadline:
+        if page.is_closed():
+            raise RuntimeError("视频号登录窗口已关闭")
+        # The iframe and its image are both created asynchronously.
+        for frame in page.frames:
+            if frame != page.main_frame and not any(
+                marker in frame.url for marker in ("open.weixin.qq.com/connect/qrconnect", "login-for-iframe")
+            ):
                 continue
-            if src.startswith("data:image/"):
-                return src
-            abs_url = urljoin(frame.url, src)
-            resp = await page.context.request.get(abs_url)
-            if resp.ok:
-                body = await resp.body()
-                content_type = resp.headers.get("content-type", "image/png").split(";")[0]
-                return f"data:{content_type};base64,{base64.b64encode(body).decode()}"
-        except Exception:
-            continue
-
-    selector_candidates = [
-        "div.login-qrcode-wrap img.qrcode",
-        "div.qrcode-wrap img.qrcode",
-        "img.qrcode",
-        'img[src^="data:image/"]',
-    ]
-    for selector in selector_candidates:
-        qr_code_img = page.locator(selector).first
-        try:
-            if not await qr_code_img.count() or not await qr_code_img.is_visible():
-                continue
-            src = await qr_code_img.get_attribute("src")
-            if src and src.startswith("data:image/"):
-                return src
-        except Exception:
-            continue
-
-    raise RuntimeError("未获取到视频号登录二维码地址")
+            try:
+                images = frame.locator(selector)
+                for index in range(min(await images.count(), 6)):
+                    try:
+                        return await _qrcode_image_data_url(page, frame, images.nth(index))
+                    except Exception:
+                        continue
+            except Exception:
+                continue  # A frame can be replaced during loading or QR refresh.
+        if await _is_tencent_login_completed(page):
+            raise RuntimeError("已完成登录，无需继续获取二维码")
+        await asyncio.sleep(0.5)
+    raise RuntimeError("视频号二维码获取超时，请检查网络后重试")
 
 
 async def _save_tencent_qrcode(page: Page, account_file: str, previous_qrcode_path: Path | None = None, qrcode_callback=None) -> dict:
@@ -236,110 +230,63 @@ async def _save_tencent_qrcode(page: Page, account_file: str, previous_qrcode_pa
 
 
 async def _is_tencent_login_completed(page: Page) -> bool:
-    publish_markers = [
-        page.locator('div:has-text("发表视频")').first,
-        page.locator('button:has-text("发表")').first,
-        page.locator('button:has-text("保存草稿")').first,
-    ]
-    for marker in publish_markers:
+    parsed = urlsplit(page.url)
+    if parsed.hostname != "channels.weixin.qq.com" or not (
+        parsed.path == "/platform" or parsed.path.startswith("/platform/")
+    ):
+        return False
+    if any("open.weixin.qq.com/connect/qrconnect" in frame.url for frame in page.frames):
+        return False
+    # Home and content pages are valid destinations too. URL change alone is not.
+    for text in ("发表视频", "发表动态", "保存草稿"):
+        marker = page.get_by_text(text, exact=True).first
         try:
             if await marker.count() and await marker.is_visible():
                 return True
         except Exception:
-            continue
-
-    if not (page.url.startswith(TENCENT_UPLOAD_URL) or page.url.startswith(TENCENT_MANAGE_URL)):
+            pass
+    home = page.get_by_text("首页", exact=True).first
+    content = page.get_by_text("内容管理", exact=True).first
+    try:
+        return bool(await home.count() and await home.is_visible()
+                    and await content.count() and await content.is_visible())
+    except Exception:
         return False
 
-    login_markers = [
-        page.locator("div.login-qrcode-wrap").first,
-        page.locator("div.qrcode-wrap").first,
-        page.locator("img.qrcode").first,
-        page.locator('span:has-text("微信扫码登录 视频号助手")').first,
-    ]
-    for marker in login_markers:
+
+async def _visible_login_tip(page: Page, pattern: str):
+    for frame in page.frames:
         try:
-            if await marker.count() and await marker.is_visible():
-                return False
+            tips = frame.get_by_text(re.compile(pattern))
+            for index in range(min(await tips.count(), 6)):
+                tip = tips.nth(index)
+                if await tip.is_visible():
+                    return tip
         except Exception:
             continue
-
-    return True
+    return None
 
 
 async def _is_tencent_qrcode_expired(page: Page) -> bool:
-    tip_selectors = [
-        'div.mask.show p.refresh-tip:has-text("二维码已过期，点击刷新")',
-        'div.mask.show p.refresh-tip:has-text("网络不可用，点击刷新")',
-        'p.refresh-tip:has-text("二维码已过期，点击刷新")',
-        'p.refresh-tip:has-text("网络不可用，点击刷新")',
-    ]
-    for selector in tip_selectors:
-        tip = page.locator(selector).first
-        try:
-            if await tip.count() and await tip.is_visible():
-                return True
-        except Exception:
-            continue
-    return False
+    # The parent login page keeps a visible retry placeholder underneath its iframe.
+    # A generic load failure does not mean the iframe QR token has expired.
+    return await _visible_login_tip(
+        page, r"二维码已?(?:过期|失效)|网络不可用.*刷新"
+    ) is not None
 
 
 async def _is_tencent_qrcode_scanned(page: Page) -> bool:
-    scanned_tips = [
-        'div.qr-tip div:has-text("已扫码")',
-        'div.qr-tip div:has-text("需在手机上进行确认")',
-    ]
-    for selector in scanned_tips:
-        tip = page.locator(selector).first
-        try:
-            if await tip.count() and await tip.is_visible():
-                return True
-        except Exception:
-            continue
-    return False
+    return await _visible_login_tip(
+        page, r"已扫码|扫描成功|需在手机上进行确认|请在(?:手机|微信)(?:中|上)?.*确认"
+    ) is not None
 
 
 async def _refresh_tencent_qrcode(page: Page) -> None:
-    visible_refresh_selectors = [
-        "div.login-qrcode-wrap div.mask.show div.refresh-wrap",
-        "div.login-qrcode-wrap div.mask.show .refresh-wrap",
-    ]
-    for selector in visible_refresh_selectors:
-        refresh_wrap = page.locator(selector).first
-        try:
-            if not await refresh_wrap.count() or not await refresh_wrap.is_visible():
-                continue
-            await refresh_wrap.click()
-            return
-        except Exception:
-            continue
-
-    tip_selectors = [
-        'div.mask.show p.refresh-tip:has-text("二维码已过期，点击刷新")',
-        'div.mask.show p.refresh-tip:has-text("网络不可用，点击刷新")',
-        'p.refresh-tip:has-text("二维码已过期，点击刷新")',
-        'p.refresh-tip:has-text("网络不可用，点击刷新")',
-    ]
-    for selector in tip_selectors:
-        tip = page.locator(selector).first
-        try:
-            if not await tip.count() or not await tip.is_visible():
-                continue
-            refresh_wrap = tip.locator("xpath=ancestor::div[contains(@class, 'refresh-wrap')]").first
-            if await refresh_wrap.count():
-                await refresh_wrap.click()
-            else:
-                await tip.click()
-            return
-        except Exception:
-            continue
-
-    fallback_refresh = page.locator("div.login-qrcode-wrap div.refresh-wrap").first
-    if await fallback_refresh.count():
-        await fallback_refresh.click()
-        return
-
-    raise RuntimeError("未找到可点击的视频号二维码刷新区域")
+    tip = await _visible_login_tip(page, r"点击刷新|刷新二维码|重新获取")
+    if tip is not None:
+        await tip.click(timeout=3000)
+    else:
+        await page.reload(wait_until="domcontentloaded", timeout=30000)
 
 
 async def _wait_for_tencent_login(
@@ -349,10 +296,13 @@ async def _wait_for_tencent_login(
     qrcode_callback=None,
     poll_interval: int = 3,
     max_checks: int = 100,
+    status_callback=None,
 ) -> dict:
     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info else None
     scanned_logged = False
     for _ in range(max_checks):
+        if page.is_closed():
+            return _build_login_result(False, "closed", "视频号登录窗口已关闭，请重试", account_file, qrcode_info)
         if await _is_tencent_login_completed(page):
             tencent_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
             return _build_login_result(True, "success", "视频号扫码登录成功", account_file, qrcode_info, page.url)
@@ -360,10 +310,13 @@ async def _wait_for_tencent_login(
         if not scanned_logged and await _is_tencent_qrcode_scanned(page):
             tencent_logger.info(_msg("📱", "已经扫码啦，还差手机端确认一下"))
             scanned_logged = True
+            await _emit_qrcode_callback(status_callback, {"stage": "scanned", "message": "已扫码，请在手机微信上确认登录"})
 
         if await _is_tencent_qrcode_expired(page):
             tencent_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
+            await _emit_qrcode_callback(status_callback, {"stage": "refreshing", "message": "二维码已过期，正在刷新…"})
             await _refresh_tencent_qrcode(page)
+            scanned_logged = False
             await asyncio.sleep(1)
             try:
                 qrcode_info = await _save_tencent_qrcode(
@@ -387,20 +340,29 @@ async def tencent_cookie_gen(
     poll_interval: int = 3,
     max_checks: int = 100,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    status_callback=None,
 ):
     account_file = _resolve_account_file(account_file)
     Path(account_file).parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=headless))
-        context = await browser.new_context()
+        context = None
         qrcode_path = None
+        qrcode_paths = set()
+
+        async def track_qrcode(payload):
+            if payload.get("image_path"):
+                qrcode_paths.add(Path(payload["image_path"]))
+            await _emit_qrcode_callback(qrcode_callback, payload)
+
         result = _build_login_result(False, "failed", "视频号登录失败", account_file)
         try:
+            context = await browser.new_context()
             page = await context.new_page()
-            await page.goto(TENCENT_LOGIN_URL)
+            await page.goto(TENCENT_LOGIN_URL, wait_until="domcontentloaded", timeout=45000)
             try:
-                qrcode_info = await _save_tencent_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+                qrcode_info = await _save_tencent_qrcode(page, account_file, qrcode_callback=track_qrcode)
                 qrcode_path = Path(qrcode_info["image_path"])
             except Exception as exc:
                 tencent_logger.warning(
@@ -408,16 +370,21 @@ async def tencent_cookie_gen(
                 )
                 qrcode_info = None
                 qrcode_path = None
+                if headless and not await _is_tencent_login_completed(page):
+                    result = _build_login_result(False, "qrcode_unavailable", "视频号二维码加载失败，请检查网络后重试", account_file)
+                    return result
             tencent_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
             result = await _wait_for_tencent_login(
                 page,
                 account_file,
                 qrcode_info,
-                qrcode_callback=qrcode_callback,
+                qrcode_callback=track_qrcode,
                 poll_interval=poll_interval,
                 max_checks=max_checks,
+                status_callback=status_callback,
             )
             if result["success"]:
+                await _emit_qrcode_callback(status_callback, {"stage": "verifying", "message": "登录成功，正在验证并保存账号…"})
                 await asyncio.sleep(2)
                 await context.storage_state(path=account_file)
                 if not await cookie_auth(account_file):
@@ -441,12 +408,20 @@ async def tencent_cookie_gen(
             return result
         finally:
             qrcode_utils = _get_qrcode_utils()
-            if qrcode_utils["remove_qrcode_file"](qrcode_path):
-                tencent_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
+            if qrcode_path:
+                qrcode_paths.add(qrcode_path)
+            for temporary_path in qrcode_paths:
+                try:
+                    qrcode_utils["remove_qrcode_file"](temporary_path)
+                except OSError:
+                    tencent_logger.warning("临时二维码清理失败: {}", temporary_path)
             if not result["success"]:
                 tencent_logger.error(_msg("😢", f"登录失败: {result['message']}"))
-            await context.close()
-            await browser.close()
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                await browser.close()
 
 
 async def tencent_setup(
@@ -795,6 +770,8 @@ class TencentBaseUploader(BaseVideoUploader):
         try:
             entry = page.get_by_text("选择视频标注", exact=True).first
             if not await entry.count():
+                if getattr(self, "require_content_label", False):
+                    raise RuntimeError("视频号缺少 AI 内容标注入口，拒绝提交")
                 tencent_logger.info(_msg("🧾", "当前页面未发现「视频标注」入口，跳过标注继续发布"))
                 return
             await entry.click()
@@ -805,6 +782,8 @@ class TencentBaseUploader(BaseVideoUploader):
             await page.wait_for_timeout(500)
             tencent_logger.success(_msg("🏷️", f"视频标注已选择：{label_text}"))
         except Exception as exc:
+            if getattr(self, "require_content_label", False):
+                raise RuntimeError(f"视频号 AI 内容标注失败，拒绝提交：{exc}") from exc
             tencent_logger.warning(_msg("😵", f"设置视频标注「{label_text}」失败，跳过继续发布：{exc}"))
 
     async def wait_for_upload_complete(
@@ -956,6 +935,8 @@ class TencentVideo(TencentBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         collection_name: str | None = None,
+        require_content_label: bool = False,
+        require_thumbnail: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -975,6 +956,8 @@ class TencentVideo(TencentBaseUploader):
         self.thumbnail_landscape_path = thumbnail_landscape_path
         self.thumbnail_portrait_path = thumbnail_portrait_path or thumbnail_path
         self.short_title = short_title
+        self.require_content_label = require_content_label
+        self.require_thumbnail = require_thumbnail
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1051,6 +1034,8 @@ class TencentVideo(TencentBaseUploader):
     ) -> None:
         cover_dialog = await self.open_thumbnail_dialog(page, selectors, dialog_titles)
         if not cover_dialog:
+            if self.require_thumbnail:
+                raise RuntimeError(f"{label}封面编辑入口不存在，拒绝提交")
             tencent_logger.info(_msg("🧍", f"当前页面没有出现{label}封面编辑弹窗，小人先跳过"))
             return
 
@@ -1058,6 +1043,8 @@ class TencentVideo(TencentBaseUploader):
             await self.upload_thumbnail_in_dialog(page, cover_dialog, thumbnail_path)
             tencent_logger.success(_msg("🥳", f"{label}封面已经设置完成"))
         except Exception as exc:
+            if self.require_thumbnail:
+                raise RuntimeError(f"{label}封面设置失败，拒绝提交：{exc}") from exc
             tencent_logger.warning(_msg("😵", f"{label}封面设置失败，这次先跳过: {exc}"))
 
     async def set_thumbnail(self, page: Page) -> None:

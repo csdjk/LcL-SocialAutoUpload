@@ -1,27 +1,49 @@
 @echo off
-TITLE One-Click Starter for social-auto-upload
+setlocal
+chcp 65001 >nul
+title social-auto-upload Web Launcher
+set "ROOT=%~dp0"
+set "PYTHON=%ROOT%.venv\Scripts\python.exe"
+set "VITE=%ROOT%sau_frontend\node_modules\.bin\vite.cmd"
 
-ECHO ==================================================
-ECHO  Starting social-auto-upload Servers...
-ECHO ==================================================
-ECHO.
+if not exist "%PYTHON%" (
+  echo Missing local Python environment: "%PYTHON%"
+  echo Install the project environment before starting the Web UI.
+  pause
+  exit /b 1
+)
+if not exist "%VITE%" (
+  echo Missing frontend dependencies. Run npm install in "%ROOT%sau_frontend".
+  pause
+  exit /b 1
+)
 
-ECHO [1/2] Starting Python Backend Server in a new window...
-REM The START command launches a new process.
-REM The first quoted string "SAU Backend" is the title of the new window.
-REM cmd /k runs the command and keeps the window open to show logs.
-START "SAU Backend" cmd /k "python sau_backend.py"
+pushd "%ROOT%"
+"%PYTHON%" -X utf8 -c "import sau_backend"
+if errorlevel 1 (
+  echo Backend dependencies are incomplete. Install the Web dependencies in the local .venv.
+  popd
+  pause
+  exit /b 1
+)
 
-ECHO [2/2] Starting Vue.js Frontend Server in another new window...
-START "SAU Frontend" cmd /k "cd sau_frontend && npm run dev -- --host 0.0.0.0"
+pushd "db"
+"%PYTHON%" -X utf8 createTable.py
+if errorlevel 1 (
+  echo Database initialization failed.
+  popd
+  popd
+  pause
+  exit /b 1
+)
+popd
 
-ECHO.
-ECHO ==================================================
-ECHO  Done.
-ECHO  Two new windows have been opened for the backend
-ECHO  and frontend servers. You can monitor logs there.
-ECHO ==================================================
-ECHO.
+if not exist "videoFile" mkdir "videoFile"
+if not exist "cookiesFile" mkdir "cookiesFile"
 
-ECHO This window will close in 10 seconds...
-timeout /t 10 /nobreak > nul
+echo Starting backend on http://127.0.0.1:5409 ...
+start "SAU Backend" /D "%ROOT%" cmd /k ""%PYTHON%" -X utf8 sau_backend.py"
+echo Starting UI on http://127.0.0.1:5173 ...
+start "SAU Frontend" /D "%ROOT%sau_frontend" cmd /k "npm run dev -- --host 127.0.0.1"
+echo The backend and UI logs are in the two new terminal windows.
+popd
