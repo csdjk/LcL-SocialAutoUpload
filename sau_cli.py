@@ -410,8 +410,8 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
     return account_file
 
 
-async def upload_video(request: DouyinVideoUploadRequest) -> Path:
-    account_file = resolve_account_file("douyin", request.account_name)
+async def upload_video(request: DouyinVideoUploadRequest, *, account_file_override=None, progress_callback=None, with_receipt=False):
+    account_file = Path(account_file_override) if account_file_override else resolve_account_file("douyin", request.account_name)
     is_ready = await douyin_setup(str(account_file), handle=False)
     if not is_ready:
         raise RuntimeError(
@@ -438,9 +438,10 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         collection_name=request.collection_name,
+        progress_callback=progress_callback,
     )
-    await app.douyin_upload_video()
-    return account_file
+    receipt = await app.douyin_upload_video()
+    return receipt if with_receipt else account_file
 
 
 async def upload_note(request: DouyinNoteUploadRequest) -> Path:
@@ -563,8 +564,8 @@ async def upload_xiaohongshu_note(request: XiaohongshuNoteUploadRequest) -> Path
     return account_file
 
 
-async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
-    account_file = resolve_account_file("bilibili", request.account_name)
+async def upload_bilibili_video(request: BilibiliVideoUploadRequest, *, with_receipt=False, account_file_override=None) -> Path | dict | None:
+    account_file = Path(account_file_override) if account_file_override else resolve_account_file("bilibili", request.account_name)
     if not account_file.exists():
         raise RuntimeError(
             f"Bilibili account file is missing: {account_file}. Run `sau bilibili login --account {request.account_name}` first."
@@ -593,7 +594,20 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
 
     result = run_biliup_command(arguments)
     if result.returncode != 0:
+        if with_receipt:
+            raise RuntimeError("B站上传接口未完成；请检查登录和平台结果，不会自动重发")
         raise RuntimeError((result.stderr or result.stdout or "").strip() or "Bilibili upload failed")
+    if with_receipt:
+        from publishing.bilibili_receipt import parse_receipt
+        receipt = parse_receipt((result.stdout or "") + "\n" + (result.stderr or ""))
+        if receipt:
+            return receipt
+        # Some biliup versions log a successful submission without JSON. Read
+        # the account's actual record rather than trusting free-form log text.
+        from publishing.bilibili_metadata import readback
+        from datetime import timezone, timedelta
+        return await asyncio.to_thread(readback, account_file, None, title=request.title,
+                                       day=datetime.now(timezone(timedelta(hours=8))).date().isoformat())
     return account_file
 
 
@@ -1077,7 +1091,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
             )
             await upload_video(request)
             print(f"Douyin video upload submitted: {request.video_file}")
@@ -1086,7 +1100,7 @@ async def dispatch(args: argparse.Namespace) -> int:
         if args.action == "upload-note":
             # 如果指定了 --notef，读取文件内容作为 note
             note_content = args.note
-            if args.notef:
+            if getattr(args, "notef", None):
                 note_file = Path(args.notef)
                 if not note_file.exists():
                     print(f"错误：文件不存在: {note_file}", file=sys.stderr)
@@ -1103,7 +1117,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                bgm=args.bgm or "",
+                bgm=getattr(args, "bgm", "") or "",
             )
             await upload_note(request)
             print(f"Douyin note upload submitted: {len(request.image_files)} images")
@@ -1138,7 +1152,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
             )
             await upload_kuaishou_video(request)
             print(f"Kuaishou video upload submitted: {request.video_file}")
@@ -1284,7 +1298,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
             )
             await upload_tencent_video(request)
             print(f"Tencent/WeChat Channels video upload submitted: {request.video_file}")
@@ -1313,7 +1327,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 description=args.desc,
                 tags=parse_tags(args.tags),
                 thumbnail_file=args.thumbnail,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
                 debug=args.debug,
                 headless=args.headless,
             )
@@ -1344,7 +1358,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 description=args.desc,
                 tags=parse_tags(args.tags),
                 thumbnail_file=args.thumbnail,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
                 debug=args.debug,
                 headless=args.headless,
             )
@@ -1437,7 +1451,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 description=args.desc,
                 tags=parse_tags(args.tags),
                 thumbnail_file=args.thumbnail,
-                collection_name=args.collection,
+                collection_name=getattr(args, "collection", None),
                 debug=args.debug,
                 headless=args.headless,
             )

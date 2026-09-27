@@ -3,14 +3,13 @@
 
 // 导入变量
 @use './variables.scss' as *;
+@use './theme.scss';
 
 // 全局样式
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
-  color: $text-primary;
-  background-color: $bg-color-page;
+  font-family: var(--el-font-family);
+  color: var(--ui-text);
+  background-color: var(--ui-bg);
 }
 
 #app {

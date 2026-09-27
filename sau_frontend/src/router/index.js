@@ -1,10 +1,9 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
-import Dashboard from '../views/Dashboard.vue'
 import DailyPublish from '../views/DailyPublish.vue'
 import AccountManagement from '../views/AccountManagement.vue'
-import MaterialManagement from '../views/MaterialManagement.vue'
-import PublishCenter from '../views/PublishCenter.vue'
-import About from '../views/About.vue'
+import TaskCenter from '../views/TaskCenter.vue'
+import ContentHub from '../views/ContentHub.vue'
+import SettingsHub from '../views/SettingsHub.vue'
 
 const routes = [
   {
@@ -14,8 +13,7 @@ const routes = [
   },
   {
     path: '/dashboard',
-    name: 'Dashboard',
-    component: Dashboard
+    redirect: '/'
   },
   {
     path: '/account-management',
@@ -24,19 +22,27 @@ const routes = [
   },
   {
     path: '/material-management',
-    name: 'MaterialManagement',
-    component: MaterialManagement
+    redirect: { path: '/content', query: { tab: 'materials' } }
   },
   {
     path: '/publish-center',
     name: 'PublishCenter',
-    component: PublishCenter
+    component: TaskCenter
+  },
+  {
+    path: '/video-library',
+    redirect: '/content'
+  },
+  {
+    path: '/automation',
+    redirect: '/settings'
   },
   {
     path: '/about',
-    name: 'About',
-    component: About
-  }
+    redirect: { path: '/settings', query: { tab: 'about' } }
+  },
+  { path: '/content', name: 'ContentHub', component: ContentHub },
+  { path: '/settings', name: 'SettingsHub', component: SettingsHub }
 ]
 
 const router = createRouter({

@@ -20,22 +20,29 @@ dependencies = [
 [project.scripts]
 sau = "sau_cli:main"
 sau-daily = "daily_publish:main"
+sau-publisher-mcp = "publisher_mcp:main"
+sau-publisher-worker = "publisher_worker:main"
+sau-publisher = "publisher_app:main"
+sau-publisher-desktop = "publisher_desktop:main"
 
 [project.optional-dependencies]
+mcp = ["mcp>=1.26,<2"]
 web = [
   "Flask[async]==3.1.1",
   "flask-cors==6.0.0",
+  "playwright>=1.58,<2",
 ]
+desktop = ["pywebview>=5,<7", "pystray>=0.19,<1", "Pillow>=11,<13"]
 
 [tool.uv]
 package = true
 
 [tool.setuptools]
-py-modules = ["cli_main", "conf", "sau_cli", "daily_publish"]
+py-modules = ["cli_main", "conf", "sau_cli", "daily_publish", "publisher_mcp", "publisher_worker", "publisher_app", "publisher_desktop", "sau_backend"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["uploader*", "utils*", "myUtils*"]
+include = ["uploader*", "utils*", "myUtils*", "publishing*"]
 
 [tool.setuptools.package-data]
 utils = ["stealth.min.js"]

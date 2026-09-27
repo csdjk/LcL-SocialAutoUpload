@@ -1,13 +1,33 @@
 {
   "output_root": "<AI日报工作区>/发布输出",
   "accounts": {
-    "bilibili": {"alias": "ai_daily", "account_id": "<已核实B站UID>", "display_name": "<显示名>"},
-    "douyin": {"alias": "ai_daily", "account_id": "<已核实抖音号>", "display_name": "<显示名>"},
-    "wechat_channels": {"web_account_id": 1, "account_id": "<已核实视频号标识>", "display_name": "<显示名>"}
+    "bilibili": {
+      "alias": "ai_daily",
+      "account_id": "<已核实B站UID>",
+      "display_name": "<显示名>"
+    },
+    "douyin": {
+      "alias": "ai_daily",
+      "account_id": "<已核实抖音号>",
+      "display_name": "<显示名>"
+    },
+    "wechat_channels": {
+      "web_account_id": 1,
+      "display_name": "<显示名>"
+    }
   },
   "platforms": {
-    "bilibili": {"access_status": "needs_login", "category": null},
-    "douyin": {"access_status": "needs_login"},
-    "wechat_channels": {"access_status": "blocked_browser_policy"}
+    "bilibili": {
+      "transport": "auto",
+      "access_status": "needs_login",
+      "category": null
+    },
+    "douyin": {
+      "transport": "auto",
+      "access_status": "needs_login"
+    },
+    "wechat_channels": {
+      "enabled": true
+    }
   }
 }

@@ -2,7 +2,7 @@
   <div class="about">
     <el-card class="about-card">
       <div class="about-header">
-        <h1>自媒体自动化运营系统</h1>
+        <h1>视频发布工作台</h1>
         <p class="version">social-auto-upload</p>
       </div>
 
@@ -11,19 +11,21 @@
       <div class="about-section">
         <h3>系统简介</h3>
         <p>
-          本系统是一款强大的自动化工具，帮助内容创作者和运营人员一键将视频内容高效发布到多个国内外主流社交媒体平台。
-          支持视频上传、定时发布等功能。
+          在本机管理视频、文案和发布账号，统一查看多平台投稿任务。
+          支持 AI 日报资源包与普通视频的立即投稿、预约和结果核对。
         </p>
       </div>
 
       <div class="about-section">
-        <h3>支持平台</h3>
+        <h3>统一投稿平台</h3>
         <div class="platform-tags">
+          <el-tag>B站</el-tag>
           <el-tag type="danger">抖音</el-tag>
-          <el-tag type="success">快手</el-tag>
           <el-tag type="warning">视频号</el-tag>
-          <el-tag type="info">小红书</el-tag>
+          <el-tag>YouTube</el-tag>
+          <el-tag>今日头条</el-tag>
         </div>
+        <p class="platform-note">YouTube、今日头条已接入浏览器投稿通道，实际投稿仍待真实账号验收。</p>
       </div>
 
       <div class="about-section">
@@ -31,9 +33,9 @@
         <ul class="feature-list">
           <li>多平台账号管理与登录状态维护</li>
           <li>视频素材上传与管理</li>
-          <li>一键多平台发布</li>
-          <li>定时发布与批量发布</li>
-          <li>Cookie 导入导出</li>
+          <li>按平台编辑文案、受众与封面设置</li>
+          <li>选择平台立即投稿或预约发布</li>
+          <li>查看任务进度与核对发布结果</li>
         </ul>
       </div>
 
@@ -68,13 +70,13 @@
       text-align: center;
 
       h1 {
-        color: $text-primary;
+        color: var(--ui-text);
         margin: 0 0 8px 0;
         font-size: 24px;
       }
 
       .version {
-        color: $text-secondary;
+        color: var(--ui-muted);
         font-size: 14px;
         margin: 0;
       }
@@ -85,12 +87,12 @@
 
       h3 {
         font-size: 16px;
-        color: $text-primary;
+        color: var(--ui-text);
         margin: 0 0 12px 0;
       }
 
       p {
-        color: $text-secondary;
+        color: var(--ui-muted);
         line-height: 1.8;
         margin: 0;
       }
@@ -105,10 +107,11 @@
       .feature-list {
         margin: 0;
         padding-left: 20px;
-        color: $text-secondary;
+        color: var(--ui-muted);
         line-height: 2;
       }
     }
   }
 }
+.about .about-card .about-section .platform-note { font-size: 13px; margin-top: 14px; }
 </style>

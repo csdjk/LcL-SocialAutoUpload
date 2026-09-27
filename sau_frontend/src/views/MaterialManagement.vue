@@ -1,7 +1,9 @@
 <template>
   <div class="material-management">
     <div class="page-header">
+      <p class="eyebrow">内容库</p>
       <h1>素材管理</h1>
+      <p class="page-description">查找和管理上传的视频、图片与其他素材。</p>
     </div>
     
     <div class="material-list-container">
@@ -16,7 +18,7 @@
         />
         <div class="action-buttons">
           <el-button type="primary" @click="handleUploadMaterial">上传素材</el-button>
-          <el-button type="info" @click="fetchMaterials" :loading="false">
+          <el-button type="info" @click="fetchMaterials(false)" :loading="isRefreshing" aria-label="刷新素材">
             <el-icon :class="{ 'is-loading': isRefreshing }"><Refresh /></el-icon>
             <span v-if="isRefreshing">刷新中</span>
           </el-button>
@@ -51,11 +53,11 @@
     <el-dialog
       v-model="uploadDialogVisible"
       title="上传素材"
-      width="40%"
+      width="min(92vw, 600px)"
       @close="handleUploadDialogClose"
     >
       <div class="upload-form">
-        <el-form label-width="80px">
+        <el-form label-position="top">
           <el-form-item label="文件名称:">
             <el-input
               v-model="customFilename"
@@ -76,7 +78,7 @@
             >
               <el-icon class="el-icon--upload"><Upload /></el-icon>
               <div class="el-upload__text">
-                将文件拖到此处，或<em>点击上传</em>
+                <em>点击选择文件</em><span class="drop-hint">也可将文件拖到这里</span>
               </div>
               <template #tip>
                 <div class="el-upload__tip">
@@ -116,7 +118,7 @@
     <el-dialog
       v-model="previewDialogVisible"
       title="素材预览"
-      width="50%"
+      width="min(92vw, 800px)"
       :top="'10vh'"
     >
       <div class="preview-container" v-if="currentMaterial">
@@ -176,14 +178,14 @@ watch(fileList, (newList) => {
 
 
 // 获取素材列表
-const fetchMaterials = async () => {
+const fetchMaterials = async (silent = false) => {
   isRefreshing.value = true
   try {
     const response = await materialApi.getAllMaterials()
     
     if (response.code === 200) {
       appStore.setMaterials(response.data)
-      ElMessage.success('刷新成功')
+      if (!silent) ElMessage.success('刷新成功')
     } else {
       ElMessage.error('获取素材列表失败')
     }
@@ -387,7 +389,7 @@ const isImageFile = (filename) => {
 onMounted(() => {
   // 只有store中没有数据时才获取
   if (appStore.materials.length === 0) {
-    fetchMaterials()
+    fetchMaterials(true)
   }
 })
 </script>
@@ -412,15 +414,16 @@ onMounted(() => {
     h1 {
       font-size: 24px;
       font-weight: 500;
-      color: $text-primary;
+      color: var(--ui-text);
       margin: 0;
     }
   }
   
   .material-list-container {
-    background-color: #fff;
-    border-radius: 4px;
-    box-shadow: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: 16px;
+    box-shadow: var(--ui-raised);
     padding: 20px;
     
     .material-search {
@@ -475,7 +478,7 @@ onMounted(() => {
   
   .form-tip {
     font-size: 12px;
-    color: #909399;
+    color: var(--ui-muted);
     margin-top: 5px;
   }
   
@@ -495,7 +498,7 @@ onMounted(() => {
 }
 
 .upload-file-item {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--ui-border);
   border-radius: 4px;
   padding: 10px;
   margin-bottom: 10px;
@@ -503,7 +506,7 @@ onMounted(() => {
 
 .upload-file-item .file-name {
   font-size: 14px;
-  color: #606266;
+  color: var(--ui-muted);
   margin-bottom: 5px;
   display: block;
 }
@@ -526,7 +529,7 @@ onMounted(() => {
 
 /* 修改上传进度条样式 */
 :deep(.el-progress__text) {
-  color: #303133 !important; /* 深灰色字体，确保在各种背景上都可见 */
+  color: var(--ui-text) !important;
   font-size: 12px;
 }
 
@@ -535,23 +538,38 @@ onMounted(() => {
 }
 
 .upload-file-item {
-  border: 1px solid #dcdfe6;
+  border: 1px solid var(--ui-border);
   border-radius: 6px; /* 增加圆角 */
   padding: 12px; /* 增加内边距 */
   margin-bottom: 12px; /* 增加外边距 */
-  background-color: #fafafa; /* 轻微背景色 */
+  background: var(--ui-surface);
   transition: box-shadow 0.3s; /* 添加过渡效果 */
 }
 
 .upload-file-item:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1); /* 悬停效果 */
+  box-shadow: var(--ui-raised-sm);
 }
 
 .upload-file-item .file-name {
   font-size: 14px;
-  color: #303133; /* 深灰色字体 */
+  color: var(--ui-text);
   margin-bottom: 8px; /* 增加底部间距 */
   display: block;
   font-weight: 500;
+}
+.material-management { padding: 8px 4px 42px; }
+.eyebrow { font-size: 12px; font-weight: 600; color: var(--el-color-primary); margin-bottom: 3px; }
+.page-description { margin-top: 6px; color: var(--ui-muted); font-size: 14px; line-height: 1.6; }
+.material-management .page-header h1 { font-size: clamp(26px, 2.4vw, 32px); font-weight: 600; }
+.material-search { gap: 16px; }
+.upload-demo { width: 100%; }
+.upload-demo :deep(.el-upload) { width: 100%; }
+.upload-demo :deep(.el-upload-dragger) { width: 100%; padding: 24px 16px; }
+.drop-hint { display: block; margin-top: 4px; color: var(--ui-muted); font-size: 12px; }
+@media(max-width: 700px) {
+  .material-management .material-list-container { padding: 16px; }
+  .material-management .material-list-container .material-search { flex-direction: column; align-items: stretch; }
+  .material-management .material-list-container .material-search .el-input { width: 100%; }
+  .material-search .action-buttons { justify-content: flex-end; }
 }
 </style>

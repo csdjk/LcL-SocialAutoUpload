@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import platform
+import os
+import logging
 import shutil
 import stat
 import subprocess
@@ -178,8 +180,16 @@ def ensure_biliup_binary(force_check: bool = True) -> Path:
 def run_biliup_command(arguments: list[str], interactive: bool = False) -> subprocess.CompletedProcess[str]:
     binary_path = ensure_biliup_binary(force_check=False)
     command = [str(binary_path), *arguments]
+    environment = os.environ.copy()
+    removed = False
+    for key in list(environment):
+        if key.lower() in ('http_proxy', 'https_proxy', 'all_proxy') and environment[key].lower().startswith(('socks5:', 'socks5h:', 'socks4:')):
+            del environment[key]
+            removed = True
+    if removed:
+        logging.getLogger(__name__).warning('biliup 不支持继承的 SOCKS 代理，本次 B站接口使用直连；显式 --proxy 参数保持有效')
     if interactive:
-        return subprocess.run(command, check=False)
+        return subprocess.run(command, check=False, env=environment)
     return subprocess.run(
         command,
         check=False,
@@ -187,4 +197,5 @@ def run_biliup_command(arguments: list[str], interactive: bool = False) -> subpr
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=environment,
     )

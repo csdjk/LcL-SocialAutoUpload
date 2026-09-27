@@ -184,6 +184,19 @@ package-lock.json
 db/database.db
 db/daily-jobs.db
 db/daily-settings.json
+db/automation.json
+db/desktop-session.json
+db/desktop.lock
+db/desktop-webview/
+db/browser-profiles/
+db/imports/
+db/*.worker.log
+db/*-journal
+db/*.worker.lock
+db/*.worker.pause
+db/*.worker.stop
+db/credentials/
+Temp/
 
 # 临时文件夹
 cookiesFile

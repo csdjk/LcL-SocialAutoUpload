@@ -50,6 +50,7 @@
                 <el-tooltip content="视频号账号" placement="top">
                   <el-tag size="small" type="warning">{{ platformStats.channels }}</el-tag>
                 </el-tooltip>
+                <el-tooltip content="B站账号" placement="top"><el-tag size="small">{{ platformStats.bilibili }}</el-tag></el-tooltip>
                 <el-tooltip content="小红书账号" placement="top">
                   <el-tag size="small" type="info">{{ platformStats.xiaohongshu }}</el-tag>
                 </el-tooltip>
@@ -195,8 +196,9 @@ const platformStats = computed(() => {
   const channels = accounts.filter(a => a.platform === '视频号').length
   const xiaohongshu = accounts.filter(a => a.platform === '小红书').length
   // 统计有账号的平台数量
-  const total = [kuaishou, douyin, channels, xiaohongshu].filter(n => n > 0).length
-  return { total, kuaishou, douyin, channels, xiaohongshu }
+  const bilibili = accounts.filter(a => a.platform === 'B站').length
+  const total = [kuaishou, douyin, channels, xiaohongshu, bilibili].filter(n => n > 0).length
+  return { total, kuaishou, douyin, channels, xiaohongshu, bilibili }
 })
 
 // 素材统计数据 - 从真实数据计算

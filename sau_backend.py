@@ -3,10 +3,13 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
+from myUtils.browser_login import get_browser_cookie
 from myUtils.login_session import LoginStatusQueue, run_login, sse_stream
 from flask_cors import CORS
 from myUtils.auth import check_cookie
@@ -14,11 +17,17 @@ from myUtils.account_validation import validate_accounts
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory, send_file
 from werkzeug.utils import secure_filename
 from conf import BASE_DIR
-from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen
+from myUtils.login import get_tencent_cookie, get_douyin_cookie, get_ks_cookie, xiaohongshu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs
+from uploader.bilibili_uploader.web_login import get_bilibili_cookie
+from uploader.bilibili_uploader.web_publish import post_video_bilibili
 import daily_publish as daily
+from myUtils.credential_import import make_credential_import_blueprint
+from myUtils.youtube_oauth import make_youtube_blueprint, get_youtube_oauth
 
 app = Flask(__name__)
+app.register_blueprint(make_credential_import_blueprint(BASE_DIR))
+app.register_blueprint(make_youtube_blueprint(BASE_DIR))
 
 #允许所有来源跨域访问
 CORS(app)
@@ -27,7 +36,7 @@ CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
 # 获取当前目录（假设 index.html 和 assets 在这里）
-current_dir = os.path.dirname(os.path.abspath(__file__))
+current_dir = str(Path(__file__).resolve().parent / 'sau_frontend' / 'dist')
 
 # 处理所有静态资源请求（未来打包用）
 @app.route('/assets/<filename>')
@@ -36,8 +45,14 @@ def custom_static(filename):
 
 # 处理 favicon.ico 静态资源（未来打包用）
 @app.route('/favicon.ico')
+@app.route('/publisher.ico')
 def favicon():
-    return send_from_directory(os.path.join(current_dir, 'assets'), 'vite.svg')
+    return send_from_directory(current_dir, 'publisher.ico')
+
+
+@app.route('/publisher.svg')
+def publisher_icon():
+    return send_from_directory(current_dir, 'publisher.svg')
 
 @app.route('/vite.svg')
 def vite_svg():
@@ -341,6 +356,8 @@ def delete_account():
 
             # 删除数据库记录
             cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
+            if cursor.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='browser_profiles'").fetchone():
+                cursor.execute('DELETE FROM browser_profiles WHERE account_id=?', (account_id,))
             conn.commit()
 
         return jsonify({
@@ -360,16 +377,43 @@ def delete_account():
 # SSE 登录接口
 @app.route('/login')
 def login():
-    # 1 小红书 2 视频号 3 抖音 4 快手
+    # 1 小红书 2 视频号 3 抖音 4 快手 5 B站
     type = request.args.get('type')
     # 账号名
-    id = request.args.get('id')
-    if type not in {'1', '2', '3', '4'} or not id or not id.strip():
-        return jsonify({'code': 400, 'msg': '平台或账号名称无效'}), 400
+    id = request.args.get('id', '')
+    mode = request.args.get('mode', 'qr')
+    if type not in {'1', '2', '3', '4', '5', '6', '7'}:
+        return jsonify({'code': 400, 'msg': '平台无效'}), 400
+    if mode not in {'qr', 'browser'} or (type in {'6', '7'} and mode != 'browser'):
+        return jsonify({'code': 400, 'msg': '该平台不支持此登录方式'}), 400
 
+    if mode == 'browser':
+        # Only this local UI may launch native browser windows. Do not accept
+        # arbitrary login URLs, profiles or cross-site window-spawning requests.
+        if request.remote_addr not in ('127.0.0.1', '::1'):
+            return jsonify({'code': 403, 'msg': '请在本机工具中打开登录窗口'}), 403
+        origin = request.headers.get('Origin')
+        if origin:
+            try:
+                value = urlsplit(origin)
+                allowed = (value.scheme == 'http' and value.hostname in ('127.0.0.1', 'localhost', '::1')
+                           and (value.netloc == request.host or value.port in (5173, 5409, 4173)) and not value.username and not value.password
+                           and not value.path and not value.query and not value.fragment)
+            except ValueError:
+                allowed = False
+            if not allowed:
+                return jsonify({'code': 403, 'msg': '请在本机工具中打开登录窗口'}), 403
+    if any(ord(c) < 32 for c in id) or len(id.strip()) > 80:
+        return jsonify({'code': 400, 'msg': '账号名称不能超过80字'}), 400
+    account_id = request.args.get('account_id')
+    if account_id is not None:
+        if (mode != 'browser' and type != '5') or not account_id.isdigit() or int(account_id) < 1:
+            return jsonify({'code': 400, 'msg': '重新登录账号编号无效'}), 400
+        account_id = int(account_id)
     status_queue = LoginStatusQueue()
+    status_queue.account_id = account_id
     # 启动异步任务线程
-    thread = threading.Thread(target=run_async_function, args=(type,id,status_queue), daemon=True)
+    thread = threading.Thread(target=run_async_function, args=(type,id,status_queue,mode), daemon=True)
     thread.start()
     response = Response(sse_stream(status_queue), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
@@ -379,6 +423,17 @@ def login():
     response.call_on_close(status_queue.cancelled.set)
     return response
 
+def _post_bilibili_response(data):
+    try:
+        result = post_video_bilibili(data)
+        return jsonify({'code': 200, 'msg': result['message'], 'data': result}), 200
+    except ValueError as exc:
+        return jsonify({'code': 400, 'msg': str(exc), 'data': None}), 400
+    except Exception:
+        # Do not echo process output; third-party logs can include credentials.
+        return jsonify({'code': 500, 'msg': 'B 站投稿未完成；请先到创作中心核对，避免重复投稿', 'data': None}), 500
+
+
 @app.route('/postVideo', methods=['POST'])
 def postVideo():
     # 获取JSON数据
@@ -386,6 +441,11 @@ def postVideo():
 
     if not data:
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    if not isinstance(data, dict):
+        return jsonify({'code': 400, 'msg': '请求数据必须为对象'}), 400
+    if data.get('type') in (5, '5'):
+        return _post_bilibili_response(data)
 
     # 从JSON数据中提取fileList和accountList
     file_list = data.get('fileList', [])
@@ -497,6 +557,14 @@ def postVideoBatch():
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
     for data in data_list:
+        if not isinstance(data, dict) or data.get('type') not in (1, 2, 3, 4, 5, '5'):
+            return jsonify({'code': 400, 'msg': '批次包含无效平台或数据'}), 400
+    for data in data_list:
+        if data.get('type') in (5, '5'):
+            response, status = _post_bilibili_response(data)
+            if status != 200:
+                return response, status
+            continue
         # 从JSON数据中提取fileList和accountList
         file_list = data.get('fileList', [])
         account_list = data.get('accountList', [])
@@ -660,36 +728,162 @@ def download_cookie():
 
 
 # 包装函数：在线程中运行异步函数
-def run_async_function(type,id,status_queue):
+def run_async_function(type,id,status_queue,mode='qr'):
     login_functions = {
         '1': xiaohongshu_cookie_gen,
         '2': get_tencent_cookie,
-        '3': douyin_cookie_gen,
+        '3': get_douyin_cookie,
         '4': get_ks_cookie,
+        '5': get_bilibili_cookie,
     }
-    run_login(login_functions[type], id, status_queue, logger=app.logger)
+    if type == '6':
+        async def login_function(name, queue):
+            await get_youtube_oauth(name, queue, account_id=getattr(queue, 'account_id', None))
+    elif mode == 'browser':
+        async def login_function(name, queue):
+            await get_browser_cookie(int(type), name, queue, account_id=getattr(queue, 'account_id', None))
+    elif type == '5' and getattr(status_queue, 'account_id', None) is not None:
+        async def login_function(name, queue):
+            await get_bilibili_cookie(name, queue, account_id=queue.account_id)
+    else:
+        login_function = login_functions[type]
+    run_login(login_function, id, status_queue, logger=app.logger)
 
 
 def _daily_error(error):
     return jsonify({"code": 400, "msg": str(error), "data": None}), 400
 
 
+@app.before_request
+def daily_local_origin():
+    if not request.path.startswith('/daily/'):
+        return None
+    if request.remote_addr not in ('127.0.0.1', '::1'):
+        return jsonify({"code": 403, "msg": "发布管理仅允许本机访问", "data": None}), 403
+    origin = request.headers.get('Origin')
+    if origin:
+        try:
+            parsed = urlsplit(origin)
+            allowed = (parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost', '::1')
+                       and (parsed.netloc == request.host or parsed.port in (5173, 4173, 5409))
+                       and not parsed.username and not parsed.password and not parsed.path
+                       and not parsed.query and not parsed.fragment)
+        except ValueError:
+            allowed = False
+        if not allowed:
+            return jsonify({"code": 403, "msg": "不接受此网页来源的发布管理操作", "data": None}), 403
+
+
 @app.route('/daily/today', methods=['GET'])
 def daily_today():
     try:
-        daily.import_legacy(daily.output_root().parent / 'publications.json')
-        path, package, errors = daily.find_today()
-        if not package:
-            return jsonify({"code": 200, "data": {"package_path": None, "package": None,
-                                                  "status": {}, "errors": errors}})
-        drafts = {}
-        statuses = daily.status_for(package)
-        for platform, item in statuses.items():
-            aid = str(item['account'].get('account_id', ''))
-            drafts[platform] = daily.get_draft(path, platform, aid) if aid else None
-        return jsonify({"code": 200, "data": {"package_path": str(path), "package": package,
-                                              "status": statuses, "drafts": drafts, "errors": errors}})
+        from publishing.service import today
+        response = jsonify({"code": 200, "data": today()})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/tasks', methods=['GET'])
+def daily_tasks():
+    try:
+        from publishing.service import list_tasks
+        limit = int(request.args.get('limit', '30'))
+        return jsonify({"code": 200, "data": list_tasks(limit)})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/library', methods=['GET'])
+def daily_library():
+    try:
+        from publishing.library import list_videos
+        return jsonify({"code": 200, "data": list_videos(int(request.args.get('limit', '30')))})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/library/import', methods=['POST'])
+def daily_library_import():
+    if request.headers.get('X-SAU-Local') != '1' or not request.headers.get('Origin'):
+        return jsonify({"code": 403, "msg": "请从本机管理页导入视频", "data": None}), 403
+    from publishing.library import import_video, MAX_VIDEO_BYTES
+    request.max_content_length = MAX_VIDEO_BYTES + 20 * 1024 * 1024
+    if request.content_length and request.content_length > MAX_VIDEO_BYTES + 20 * 1024 * 1024:
+        return _daily_error(ValueError('视频超过 2 GiB 导入上限'))
+    video = request.files.get('video')
+    if video is None:
+        return _daily_error(ValueError('请选择 MP4 视频'))
+    try:
+        tags = [item.strip() for item in request.form.get('tags', '').replace('，', ',').split(',') if item.strip()]
+        cover = request.files.get('cover')
+        result = import_video(video.stream, video.filename, request.form.get('title', ''),
+                              request.form.get('description', ''), tags,
+                              cover.stream if cover else None, request.form.get('ai_declaration', ''))
+        return jsonify({"code": 200, "data": {"id": result['package']['edition_id'],
+                                                 "existing": result['existing']}})
+    except (ValueError, OSError, json.JSONDecodeError, subprocess.SubprocessError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/library/<ident>/asset/<key>', methods=['GET'])
+def daily_library_asset(ident, key):
+    try:
+        from publishing.library import root
+        package_path = root() / ident / 'package.json'
+        package = daily.load_package(package_path)
+        asset = package['assets'][key]
+        return send_file(package_path.parent / asset['path'], conditional=True)
+    except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/library/submit', methods=['POST'])
+def daily_library_submit():
+    if request.headers.get('X-SAU-Local') != '1' or not request.headers.get('Origin'):
+        return jsonify({"code": 403, "msg": "请从本机管理页预约投稿", "data": None}), 403
+    try:
+        from publishing.library import submit
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('投稿请求格式无效')
+        return jsonify({"code": 200, "data": submit(body.get('id'), body.get('platforms'),
+                                                       body.get('scheduled_for'), body.get('payloads'))})
+    except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/automation', methods=['GET', 'PUT'])
+def daily_automation():
+    from publishing import automation
+    try:
+        if request.method == 'GET':
+            return jsonify({"code": 200, "data": automation.status()})
+        if request.headers.get('X-SAU-Local') != '1' or not request.headers.get('Origin'):
+            return jsonify({"code": 403, "msg": "请从本机管理页修改排程", "data": None}), 403
+        data = request.get_json(silent=True)
+        saved = automation.save_settings(data)
+        return jsonify({"code": 200, "data": {"settings": saved}})
+    except (ValueError, OSError, sqlite3.Error, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/worker', methods=['GET', 'PUT'])
+def daily_worker_status():
+    from publishing import queue
+    try:
+        if request.method == 'PUT':
+            if request.headers.get('X-SAU-Local') != '1' or not request.headers.get('Origin'):
+                return jsonify({"code": 403, "msg": "请从本机管理页控制后台", "data": None}), 403
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict) or type(data.get('paused')) is not bool:
+                raise ValueError('请明确指定是否暂停新任务')
+            queue.set_paused(data['paused'])
+        with queue.worker_lock() as available:
+            running = not available
+        return jsonify({"code": 200, "data": {"running": running, "paused": queue.pause_path().is_file()}})
+    except (ValueError, OSError) as error:
         return _daily_error(error)
 
 
@@ -706,6 +900,40 @@ def daily_asset(date, revision, key):
         return _daily_error(error)
 
 
+@app.route('/daily/channels-account', methods=['GET', 'POST'])
+@app.route('/daily/accounts/<platform>', methods=['GET', 'POST'])
+def daily_channels_account(platform='wechat_channels'):
+    if platform not in daily.PLATFORMS:
+        return _daily_error(ValueError("发布平台无效"))
+    if request.method == 'GET':
+        try:
+            return jsonify({"code": 200, "data": daily.account_binding_options(platform)})
+        except (ValueError, OSError, sqlite3.Error):
+            return jsonify({"code": 500, "msg": "无法读取视频号绑定配置", "data": None}), 500
+    # Explicit local-origin request: third-party pages cannot switch publishing targets.
+    try:
+        origin = urlsplit(request.headers.get('Origin', ''))
+        allowed = (origin.scheme == 'http' and origin.hostname in ('127.0.0.1', 'localhost', '::1')
+                   and (origin.netloc == request.host or origin.port in (5173, 4173, 5409)) and not origin.username and not origin.password
+                   and not origin.path and not origin.query and not origin.fragment)
+    except ValueError:
+        allowed = False
+    if request.remote_addr not in ('127.0.0.1', '::1') or not allowed or request.headers.get('X-SAU-Local') != '1':
+        return jsonify({"code": 403, "msg": "请在本机页面选择发布账号", "data": None}), 403
+    if not request.is_json:
+        return jsonify({"code": 415, "msg": "请求格式不正确", "data": None}), 415
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"code": 400, "msg": "请选择发布账号", "data": None}), 400
+    try:
+        result = daily.bind_account(platform, body.get('web_account_id'), body.get('revision'))
+        return jsonify({"code": 200, "msg": "发布账号已绑定，尚未上传或投稿", "data": result})
+    except ValueError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except (OSError, sqlite3.Error):
+        return jsonify({"code": 500, "msg": "绑定保存失败，请刷新配置后检查", "data": None}), 500
+
+
 @app.route('/daily/draft', methods=['PUT'])
 def daily_draft():
     try:
@@ -714,6 +942,15 @@ def daily_draft():
                                   str(body['account_id']), body['payload'])
         return jsonify({"code": 200, "data": result})
     except (ValueError, KeyError, OSError, json.JSONDecodeError) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/bilibili/categories', methods=['GET'])
+def daily_bilibili_categories():
+    try:
+        from publishing.bilibili_metadata import load_categories
+        return jsonify({'code': 200, 'data': load_categories()})
+    except (ValueError, OSError) as error:
         return _daily_error(error)
 
 
@@ -738,11 +975,26 @@ def daily_task(job_id):
 @app.route('/daily/reconcile', methods=['POST'])
 def daily_reconcile():
     try:
-        body = request.get_json(force=True)
-        return jsonify({"code": 200, "data": daily.reconcile(body['task_id'], body['state'], body['evidence'])})
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('核对请求格式无效，请通过核对窗口提交')
+        if 'confirmed' in body:
+            if body['confirmed'] is not True:
+                raise ValueError('请确认所选状态')
+            result = daily.confirm_task_status(body.get('task_id'), body.get('state'),
+                                               expected_updated_at=body.get('expected_updated_at'))
+        else:
+            result = daily.reconcile(body.get('task_id'), body.get('state'), body.get('evidence'),
+                                     expected_updated_at=body.get('expected_updated_at'))
+        return jsonify({"code": 200, "data": result})
+    except daily.ReconcileConflictError as error:
+        return jsonify({"code": 409, "msg": str(error), "data": None}), 409
     except (ValueError, KeyError, TypeError) as error:
         return _daily_error(error)
 
+
+from myUtils.daily_oneclick import make_oneclick_blueprint
+app.register_blueprint(make_oneclick_blueprint())
 
 if __name__ == '__main__':
     app.run(host='127.0.0.1', port=5409)

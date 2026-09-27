@@ -91,3 +91,26 @@ node --test sau_frontend/tests/loginStream.test.js
 账号管理优先显示上次保存的校验状态，不再把所有账号强制置为「验证中」。点击刷新按钮才重新校验；添加账号已完成校验后直接更新列表。账号列表请求最多等待 10 秒；校验请求设置前后端超时，并保留临时超时/异常账号的上次状态。校验成功可将异常账号恢复为正常，旧校验结果不会覆盖重新登录后的新凭据。
 
 验证命令：`python -m pytest tests/test_account_validation.py tests/test_legacy_login_stream.py tests/test_tencent_web_login.py tests/test_tencent_verification_dialog.py -q`；在 `sau_frontend` 中执行 `node --test tests/*.test.js` 与 `npm run build`。本次页面验证仅进行账号选择、取消、切换平台、刷新与失败恢复，未触发视频发布。
+
+## 抖音扫码后停留在二维码（2026-09-24）
+
+抖音扫码回执可能先返回 `scanned`，在手机确认后再返回安全验证错误 `2046`，同时电脑页面保持原 URL。仅等待页面跳转会把平台拒绝误显示成一直等待扫码。本次实际诊断收到了该错误，平台要求先在抖音 APP 完成验证，再重新登录；尚未完成真实账号添加验收。
+
+登录流程现在观察官方页面自身发出的扫码回执，将“已扫码”和“等待电脑端登录”同步到弹窗。二维码模式遇到 `2046` 时显示“在官方窗口完成验证”，由用户选择继续；其他明确拒绝会结束会话。监听过程不另行调用登录接口，不记录完整响应、二维码 Token 或 Cookie。成功仍要求进入登录后页面并取得有效会话凭据。
+
+添加抖音账号时也可直接选择“官方窗口登录”。此操作显式打开独立的官方登录窗口，用户在其中扫码、完成官方要求的身份验证；工具最多等待约 5 分钟。官方窗口模式收到 `2046` 后保留会话，允许官方 SDK 加载二次验证界面，不提前关闭浏览器。关闭工具弹窗会取消对应登录；关闭官方窗口、验证未完成或超时都不保存账号。该入口只适用于抖音，服务端拒绝其他平台请求此模式。
+
+扫码确认与二次验证是不同步骤，不能让用户反复扫描同一个登录二维码来代替验证。[抖音官方登录 SDK](https://auth.zijieapi.com/ucenter_web/app/douyin-login-new/dist/index.umd.production.js) 使用的验证模块会在 `2046` 携带验证入口时继续加载官方界面；本工具只等待用户在该界面完成操作。
+
+二维码获取不再等待页面所有网络请求停止；网页弹窗已有二维码时，不额外执行终端二维码解码。添加账号弹窗限制为视口宽度减去左右安全边距，长错误说明在手机尺寸下可完整换行。
+
+相关验证：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_douyin_login_state.py tests/test_douyin_login_timing.py tests/test_douyin_web_login.py tests/test_legacy_login_stream.py -q
+node --test sau_frontend/tests/loginStream.test.js
+```
+
+修改 Python 后需重启 `SAU Backend`；前端刷新即可加载开发版更新。已通过 32 项相关 Python 测试、12 项登录事件测试及前端构建。在本地 Chromium 页面以登录事件回放检查入口、需验证、等待官方验证和取消，覆盖 `320×568`、`375×667`、`390×844`、`1440×900`；手机弹窗两侧保留 16px，文字及按钮未超出边界。截图保存在本机忽略目录 `cookiesFile/login-diagnostics/ui/official-*.png`。
+
+上述验证证明本地流程与界面行为；真实扫码、安全验证及账号保存仍需账号持有人在官方窗口完成后核对，尚不代表真实账号添加成功。

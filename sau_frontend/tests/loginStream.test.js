@@ -2,9 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createLoginStream } from '../src/utils/loginStream.js'
 
-function setup() {
+function setup(options = {}) {
   let source, serial = 0
-  const timers = new Map(), events = []
+  const timers = new Map(), events = [], errorDetails = []
   class FakeSource {
     constructor() { source = this; this.handlers = {}; this.closed = false }
     close() { this.closed = true }
@@ -15,14 +15,15 @@ function setup() {
   const stream = createLoginStream('http://localhost/login', {
     onQr: data => events.push(['qr', data]),
     onStatus: data => events.push(['status', data]),
-    onError: data => events.push(['error', data]),
+    onError: (data, details) => { events.push(['error', data]); errorDetails.push(details) },
     onSuccess: () => { assert.equal(source.closed, true); events.push(['success']) }
   }, {
+    ...options,
     EventSourceImpl: FakeSource,
     setTimeoutImpl: (fn, delay) => { const id = ++serial; timers.set(id, { fn, delay }); return id },
     clearTimeoutImpl: id => timers.delete(id)
   })
-  return { source, stream, timers, events }
+  return { source, stream, timers, events, errorDetails }
 }
 
 test('success closes immediately and ignores EOF/error/reconnect', () => {
@@ -40,6 +41,20 @@ test('named progress is not mistaken for image data', () => {
   const { source, events } = setup()
   source.named('login-status', { stage: 'scanned', message: '请确认' })
   assert.equal(events[0][0], 'status'); assert.equal(source.closed, false)
+})
+
+test('official browser mode clears only the QR timeout', () => {
+  const { source, timers } = setup()
+  source.named('login-status', { stage: 'browser_open', message: '请在官方窗口验证' })
+  assert.deepEqual(Array.from(timers.values()).map(t => t.delay), [370000])
+  assert.equal(source.closed, false)
+})
+
+test('security failure preserves structured manual action status', () => {
+  const { source, errorDetails } = setup()
+  source.named('login-error', { status: 'verification_required', message: '请在官方窗口验证' })
+  assert.equal(errorDetails[0].status, 'verification_required')
+  assert.equal(source.closed, true)
 })
 test('server error reason survives subsequent EOF and 500', () => {
   const { source, events } = setup()
@@ -77,4 +92,28 @@ test('legacy raw base64 remains supported', () => {
   const { source, events } = setup()
   source.message('A'.repeat(104))
   assert.equal(events[0][0], 'qr'); assert.match(events[0][1], /^data:image\/png;base64,/)
+})
+
+
+test('browser startup timeout does not incorrectly ask for a QR code', () => {
+  const { timers, events } = setup({ mode: 'browser' })
+  Array.from(timers.values()).find(t => t.delay === 60000).fn()
+  assert.match(events[0][1], /浏览器打开超时/)
+})
+test('browser security verification stays open until terminal success', () => {
+  const { source, timers, events } = setup({ mode: 'browser' })
+  source.named('login-status', { stage: 'browser_open', message: '已打开 Edge' })
+  source.named('login-status', { stage: 'verification_required', message: '请完成身份验证' })
+  assert.equal(source.closed, false)
+  assert.equal(timers.size, 1)
+  source.named('login-status', { stage: 'saving', message: '保存账号' })
+  source.message('200')
+  assert.equal(source.closed, true)
+  assert.equal(events.at(-1)[0], 'success')
+})
+test('browser total timeout requests browser login instead of manual QR', () => {
+  const { source, timers, events } = setup({ mode: 'browser' })
+  source.named('login-status', { stage: 'browser_open', message: '已打开 Edge' })
+  Array.from(timers.values()).find(t => t.delay === 370000).fn()
+  assert.match(events.at(-1)[1], /重新打开浏览器/)
 })

@@ -11,9 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-from patchright.async_api import Page
-from patchright.async_api import Playwright
-from patchright.async_api import async_playwright
+from playwright.async_api import Page
+from playwright.async_api import Playwright
+from playwright.async_api import async_playwright
 
 from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
@@ -96,9 +96,8 @@ def _get_qrcode_utils():
 
 
 def format_str_for_short_title(origin_title: str) -> str:
-    allowed_special_chars = "《》“”:+?%°"
-    filtered_chars = [char if char.isalnum() or char in allowed_special_chars else " " if char == "," else "" for char in origin_title]
-    formatted_string = "".join(filtered_chars)
+    # 视频号短标题仅保留文字与数字，不带标点或其他特殊符号。
+    formatted_string = "".join(char for char in origin_title if char.isalnum())
 
     # 视频号「短标题」要求 6~16 个字符/汉字；本项目按 >6 且 <16 从严控制在 7~15。
     formatted_string = formatted_string.strip()
@@ -106,7 +105,7 @@ def format_str_for_short_title(origin_title: str) -> str:
         formatted_string = formatted_string[:15]
     if len(formatted_string) < 7:
         # 不足下限时补足到 7；不能用尾部空格（会被平台 trim 掉导致仍不达标）
-        filler = "，精彩内容分享"
+        filler = "精彩内容分享"
         formatted_string = (formatted_string + filler)[:7] if formatted_string else "精彩视频内容分享"
 
     return formatted_string
@@ -507,6 +506,8 @@ class TencentBaseUploader(BaseVideoUploader):
         if not await dialog.count() or not await dialog.is_visible():
             return None
 
+        if getattr(self, 'publication_progress', None):
+            await self.publication_progress.emit('verification', '请在弹出的官方窗口或手机上完成验证；无需重复点击投稿')
         output_path = Path(qr_path) if qr_path else Path(self.account_file).with_name(
             f"{Path(self.account_file).stem}_verification_qr.png"
         )
@@ -600,9 +601,11 @@ class TencentBaseUploader(BaseVideoUploader):
         async def find_file_input():
             for fr in page.frames:  # 主 frame + 所有 iframe（视频号编辑器可能在 iframe 内）
                 try:
-                    fi = fr.locator('input[type="file"]')
-                    if await fi.count():
-                        return fi.first
+                    fi = fr.locator('input[type="file"][accept*="video"], input[type="file"][accept*=".mp4"], input[type="file"]:not([accept]), input[type="file"][accept=""]')
+                    if await fi.count() == 1:
+                        from .workflow import EditorPage
+                        self._editor_scope = EditorPage(page, fr)
+                        return fi
                 except Exception:
                     continue
             return None
@@ -805,6 +808,7 @@ class TencentBaseUploader(BaseVideoUploader):
         deadline = time.monotonic() + timeout_seconds
         last_report = 0.0
         retries = 0
+        last_media_percent = None
         while True:
             if time.monotonic() > deadline:
                 try:
@@ -817,6 +821,16 @@ class TencentBaseUploader(BaseVideoUploader):
                     f"视频号上传超过 {timeout_seconds} 秒仍未完成（「发表」按钮一直不可用）"
                 )
             try:
+                if getattr(self, 'publication_progress', None):
+                    from publishing.progress import read_widget_percent
+                    percent = await read_widget_percent(page, 'div.media-status-content')
+                    if percent is not None and percent != last_media_percent:
+                        await self.publication_progress.emit('uploading',
+                            f'视频号页面显示上传 {percent}%', media_percent=percent)
+                        last_media_percent = percent
+                    elif percent is None and last_media_percent is not None:
+                        await self.publication_progress.emit('uploading', '视频号页面暂未提供当前上传百分比')
+                        last_media_percent = None
                 publish_button = page.locator('div.form-btns button:has-text("发表"):visible').first
                 if await publish_button.count():
                     button_class = await publish_button.get_attribute("class")
@@ -852,6 +866,9 @@ class TencentBaseUploader(BaseVideoUploader):
                             "（常见原因：文件过大、上行带宽太慢导致平台侧超时，或走了代理/VPN）"
                         )
                     tencent_logger.error(_msg("😵", f"发现上传出错了，准备重试（第 {retries}/{max_retries} 次）"))
+                    last_media_percent = None
+                    if getattr(self, 'publication_progress', None):
+                        await self.publication_progress.emit('uploading', f'视频上传失败，正在重试（第 {retries}/{max_retries} 次）')
                     await self.handle_upload_error(page)
             except RuntimeError:
                 raise
@@ -937,6 +954,9 @@ class TencentVideo(TencentBaseUploader):
         collection_name: str | None = None,
         require_content_label: bool = False,
         require_thumbnail: bool = False,
+        cover_mode: str = "custom",
+        edition_day: str | None = None,
+        progress_callback=None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -958,6 +978,9 @@ class TencentVideo(TencentBaseUploader):
         self.short_title = short_title
         self.require_content_label = require_content_label
         self.require_thumbnail = require_thumbnail
+        self.cover_mode = cover_mode
+        self.edition_day = edition_day
+        self.progress_callback = progress_callback
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -975,112 +998,116 @@ class TencentVideo(TencentBaseUploader):
         await page.get_by_role("button", name="删除", exact=True).click()
         await self.upload_video_file(page, self.file_path)
 
+    # SAU_DUAL_COVER_FIX_20260925_V2
+    async def _visible_cover_dialog(self, page, titles, *, crop=False):
+        from .cover_controls import CoverControls
+        return await CoverControls(page, clock=time).find_dialog(titles, crop=crop)
+
     async def open_thumbnail_dialog(self, page: Page, selectors: list[str], dialog_titles: list[str]):
-        for selector in selectors:
-            cover_entry = page.locator(selector).first
-            try:
-                if not await cover_entry.count():
-                    continue
-                await cover_entry.wait_for(state="visible", timeout=3000)
-                await cover_entry.click()
-                await page.wait_for_timeout(500)
-                break
-            except Exception:
-                continue
+        from .cover_controls import CoverControls
+        return await CoverControls(page, clock=time).open_editor(selectors, dialog_titles)
 
-        for title in dialog_titles:
-            cover_dialog = page.locator("div.weui-desktop-dialog").filter(has_text=title).first
-            if await cover_dialog.count():
-                return cover_dialog
-        return None
+    async def _cover_preview_state(self, cover_dialog):
+        from .cover_controls import preview_state
+        return await preview_state(cover_dialog)
 
-    async def confirm_thumbnail_crop(self, page: Page) -> None:
-        crop_dialog = page.locator("div.weui-desktop-dialog").filter(has_text="裁剪封面图").first
-        if not await crop_dialog.count():
-            return
+    async def confirm_thumbnail_crop(self, page: Page) -> bool:
+        from .cover_controls import CoverControls
+        return await CoverControls(page, clock=time).confirm_crop()
 
+    async def upload_thumbnail_in_dialog(self, page: Page, cover_dialog, thumbnail_path: str):
+        from .cover_controls import CoverControls, CoverControlError
+        controls = CoverControls(page, clock=time)
+        if await cover_dialog.count() != 1 or not await cover_dialog.is_visible():
+            raise CoverControlError('封面编辑弹窗不可见，未选择图片')
+        self._cover_step = '选择本地图片'
+        before = await self._cover_preview_state(cover_dialog)
+        file_input = await controls.image_input(cover_dialog)
+        if await file_input.evaluate('el => el.files.length'):
+            await file_input.set_input_files([], timeout=10000)
+        await file_input.set_input_files(thumbnail_path, timeout=15000)
+
+        self._cover_step = '上传图片与确认裁剪'
+        deadline = time.monotonic() + 45
+        preview_signature = None
+        stable_since = None
+        confirmed_crop = False
+        while time.monotonic() < deadline:
+            if await self.confirm_thumbnail_crop(page):
+                confirmed_crop = True
+                stable_since = None
+            if await cover_dialog.count() != 1 or not await cover_dialog.is_visible():
+                raise CoverControlError('封面尚未确认，编辑弹窗已关闭')
+            preview = await self._cover_preview_state(cover_dialog)
+            confirm = await controls.confirm_button(cover_dialog)
+            preview_updated = preview['signature'] != before['signature']
+            ready = ((preview_updated or confirmed_crop) and preview['loaded'] and
+                     not await controls.busy(cover_dialog) and confirm is not None and
+                     await confirm.is_enabled() and
+                     'disabled' not in (await confirm.get_attribute('class') or ''))
+            if ready:
+                if preview_signature != preview['signature'] or stable_since is None:
+                    preview_signature = preview['signature']
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= .6:
+                    self._cover_step = '保存封面并等待编辑器关闭'
+                    await confirm.click(timeout=12000)
+                    await cover_dialog.wait_for(state='hidden', timeout=15000)
+                    return preview
+            else:
+                stable_since = None
+            await asyncio.sleep(.15)
+        raise CoverControlError('封面预览或确认按钮未就绪，未保存封面、未提交投稿')
+
+    async def set_single_thumbnail(self, page: Page, thumbnail_path: str,
+                                   selectors: list[str], dialog_titles: list[str], label: str) -> None:
+        from .cover_controls import CoverControls, CoverControlError, preview_state
+        controls = CoverControls(page, clock=time)
+        self._cover_step = '打开封面编辑器'
         try:
-            await crop_dialog.wait_for(state="visible", timeout=10000)
-            crop_confirm_button = crop_dialog.locator(
-                'div.weui-desktop-dialog__ft button.weui-desktop-btn_primary:has-text("确定")'
-            ).first
-            if await crop_confirm_button.count():
-                await crop_confirm_button.wait_for(state="visible", timeout=5000)
-                await crop_confirm_button.click()
-                await page.wait_for_timeout(1000)
+            flow = getattr(self, 'publication_progress', None)
+            if flow is not None:
+                await flow.emit('cover', f'设置{label}封面')
+            entry = await controls.find_cover(selectors)
+            before = await preview_state(entry) if entry is not None else None
+            dialog = await self.open_thumbnail_dialog(page, selectors, dialog_titles)
+            if dialog is None:
+                raise CoverControlError('未找到可见的封面编辑弹窗')
+            if before is None:
+                entry = await controls.find_cover(selectors)
+                if entry is None:
+                    raise CoverControlError('无法确认当前编辑器对应的横版或竖版封面区域')
+                before = await preview_state(entry)
+            saved = await self.upload_thumbnail_in_dialog(page, dialog, thumbnail_path)
+            self._cover_step = '检查页面上的封面缩略图'
+            await controls.verify_saved_preview(selectors, before, saved)
         except Exception as exc:
-            tencent_logger.warning(_msg("😵", f"封面裁剪确认时出错，小人继续尝试保存主弹窗: {exc}"))
-
-    async def upload_thumbnail_in_dialog(self, page: Page, cover_dialog, thumbnail_path: str) -> None:
-        await cover_dialog.wait_for(state="visible", timeout=5000)
-        file_input = cover_dialog.locator('.single-cover-uploader-wrap input[type="file"]').first
-        await file_input.wait_for(state="attached", timeout=10000)
-        await file_input.set_input_files(thumbnail_path)
-        await page.wait_for_timeout(2000)
-
-        confirm_button = cover_dialog.locator(
-            'div.weui-desktop-dialog__ft button.weui-desktop-btn_primary:has-text("确认")'
-        ).first
-        await confirm_button.wait_for(state="visible", timeout=10000)
-        await confirm_button.click()
-
-    async def set_single_thumbnail(
-        self,
-        page: Page,
-        thumbnail_path: str,
-        selectors: list[str],
-        dialog_titles: list[str],
-        label: str,
-    ) -> None:
-        cover_dialog = await self.open_thumbnail_dialog(page, selectors, dialog_titles)
-        if not cover_dialog:
+            reason = str(exc) if isinstance(exc, CoverControlError) or type(exc) is RuntimeError else '页面控件等待超时或操作失败'
+            message = f'{label}封面设置失败，尚未提交投稿：{self._cover_step}：{reason}'
             if self.require_thumbnail:
-                raise RuntimeError(f"{label}封面编辑入口不存在，拒绝提交")
-            tencent_logger.info(_msg("🧍", f"当前页面没有出现{label}封面编辑弹窗，小人先跳过"))
+                raise RuntimeError(message) from None
+            tencent_logger.warning(message)
             return
-
-        try:
-            await self.upload_thumbnail_in_dialog(page, cover_dialog, thumbnail_path)
-            tencent_logger.success(_msg("🥳", f"{label}封面已经设置完成"))
-        except Exception as exc:
-            if self.require_thumbnail:
-                raise RuntimeError(f"{label}封面设置失败，拒绝提交：{exc}") from exc
-            tencent_logger.warning(_msg("😵", f"{label}封面设置失败，这次先跳过: {exc}"))
+        tencent_logger.success(_msg('🖼️', f'{label}封面已保存并核对页面预览'))
 
     async def set_thumbnail(self, page: Page) -> None:
-        if not self.thumbnail_landscape_path and not self.thumbnail_portrait_path:
-            return
-
-        tencent_logger.info(_msg("🖼️", "小人准备设置封面"))
-
+        # Specific cover components only; never fall back to a generic page div.
         landscape_selectors = [
-            'div.horizontal-cover-wrap:has-text("4:3")',
-            'div[class*="cover-wrap"]:has-text("4:3"):has-text("动态")',
-            'div:has-text("视频号动态"):has-text("4:3")',
-            'div:has-text("横版封面"):has-text("4:3")',
+            'div.horizon-cover-wrap',
+            'div.horizontal-cover-wrap',
         ]
         portrait_selectors = [
-            'div.vertical-cover-wrap:has-text("个人主页卡片"):has-text("3:4")',
-            'div.vertical-cover-wrap:has-text("3:4")',
-            'div.vertical-cover-wrap:has-text("个人主页卡片")',
+            'div.vertical-cover-wrap',
+            '[class*="cover-wrap"]:has-text("3:4")',
         ]
-
         if self.thumbnail_landscape_path:
             await self.set_single_thumbnail(
-                page,
-                self.thumbnail_landscape_path,
-                landscape_selectors,
-                ["编辑视频号动态封面", "编辑动态封面", "编辑封面"],
-                "4:3 横版",
-            )
+                page, self.thumbnail_landscape_path, landscape_selectors,
+                ['编辑分享卡片', '编辑视频号动态封面', '编辑动态封面', '编辑封面'], '4:3 横版')
         if self.thumbnail_portrait_path:
             await self.set_single_thumbnail(
-                page,
-                self.thumbnail_portrait_path,
-                portrait_selectors,
-                ["编辑个人主页卡片", "编辑封面"],
-                "3:4 竖版",
-            )
+                page, self.thumbnail_portrait_path, portrait_selectors,
+                ['编辑个人主页卡片', '编辑封面'], '3:4 竖版')
 
     async def prepare_video_for_publish(self, page: Page) -> None:
         await self.wait_for_realtime_verification(page)
@@ -1090,45 +1117,16 @@ class TencentVideo(TencentBaseUploader):
         # 上传中选的合集会被重置/不绑定（"日志说选了、后台没加"的根因）。
         # 改到 wait_for_upload_complete 之后再选，见 upload()。
 
-    async def upload(self, playwright: Playwright) -> None:
-        tencent_logger.info(_msg("🧍", "小人先检查 cookie、视频文件和发布时间"))
-        await self.validate_upload_args()
-        tencent_logger.info(_msg("🥳", "上传前检查通过"))
-
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=self.headless))
-        context = await browser.new_context(storage_state=self.account_file)
-
-        try:
-            page = await context.new_page()
-            await self.open_upload_page(page)
-            tencent_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}"))
-
-            await self.upload_video_file(page, self.file_path)
-            await self.prepare_video_for_publish(page)
-            await self.wait_for_upload_complete(page)
-            # 上传完成、表单稳定后再选合集（否则上传中选的会被重置）
-            await self.apply_collection(page)
-            await self.apply_original_statement(page)
-            await self.set_thumbnail(page)
-
-            if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
-                await self.set_schedule_time_tencent(page, self.publish_date)
-
-            await self.set_short_title(page, self.title, self.short_title)
-            await self.submit_publish(page)
-
-            await context.storage_state(path=self.account_file)
-            tencent_logger.success(_msg("🥳", "cookie 更新完毕"))
-        finally:
-            await context.close()
-            await browser.close()
+    async def upload(self, playwright: Playwright):
+        from .workflow import run_video
+        return await run_video(self, playwright)
 
     async def tencent_upload_video(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)
 
     async def main(self):
-        await self.tencent_upload_video()
+        return await self.tencent_upload_video()
 
 
 class TencentNote(TencentBaseUploader):

@@ -15,10 +15,10 @@ export function createLoginStream(url, callbacks, options = {}) {
     qrTimer = loginTimer = null
     source?.close()
   }
-  const fail = (message) => {
+  const fail = (message, details) => {
     if (!active) return
     close()
-    callbacks.onError?.(message)
+    callbacks.onError?.(message, details)
   }
   const parseEvent = (event) => {
     try { return JSON.parse(event.data) } catch { return null }
@@ -26,8 +26,8 @@ export function createLoginStream(url, callbacks, options = {}) {
 
   try {
     source = new Source(url)
-    qrTimer = schedule(() => fail('二维码获取超时，请检查网络后重试'), options.qrTimeoutMs ?? 60000)
-    loginTimer = schedule(() => fail('登录等待超时，请重新扫码并在手机上确认'), options.loginTimeoutMs ?? 370000)
+    qrTimer = schedule(() => fail(options.mode === 'browser' ? '浏览器打开超时，请检查 Edge 后重试' : '二维码获取超时，请检查网络后重试'), options.qrTimeoutMs ?? 60000)
+    loginTimer = schedule(() => fail(options.mode === 'browser' ? '登录等待超时，请重新打开浏览器并完成平台验证' : '登录等待超时，请重新扫码并在手机上确认'), options.loginTimeoutMs ?? 370000)
     source.onmessage = (event) => {
       if (!active) return
       const data = event.data
@@ -54,12 +54,16 @@ export function createLoginStream(url, callbacks, options = {}) {
     source.addEventListener('login-status', (event) => {
       if (!active) return
       const payload = parseEvent(event)
+      if (payload?.stage === 'browser_open' && qrTimer !== null) {
+        unschedule(qrTimer)
+        qrTimer = null
+      }
       if (payload && typeof payload.message === 'string') callbacks.onStatus?.(payload)
     })
     source.addEventListener('login-error', (event) => {
       if (!active) return
       const payload = parseEvent(event)
-      fail(typeof payload?.message === 'string' ? payload.message : '登录失败，请重试')
+      fail(typeof payload?.message === 'string' ? payload.message : '登录失败，请重试', payload)
     })
     source.onerror = () => fail('登录连接已断开，请确认后端服务正常后重试')
   } catch {

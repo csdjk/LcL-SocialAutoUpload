@@ -12,6 +12,13 @@ from unittest.mock import AsyncMock, patch
 import daily_publish as daily
 
 
+class FixedDateTime(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        value = cls(2026, 9, 23, 12, tzinfo=daily.BEIJING)
+        return value.astimezone(tz) if tz else value.replace(tzinfo=None)
+
+
 class DailyPublishTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -32,7 +39,10 @@ class DailyPublishTests(unittest.TestCase):
         (self.base / "cookies").mkdir()
         for name in ("bilibili", "douyin", "tencent"):
             (self.base / "cookies" / f"{name}_test.json").write_text("{}", encoding="utf-8")
-        self.patches = [patch.object(daily, "DB_PATH", self.base / "daily.db"),
+        self.patches = [patch.object(daily, "datetime", FixedDateTime),
+                        # Queue/ledger fixtures use binary placeholders and never contact Google.
+                        patch('publishing.youtube_api.preflight'),
+                        patch.object(daily, "DB_PATH", self.base / "daily.db"),
                         patch.object(daily, "SETTINGS_PATH", self.settings_path),
                         patch.object(daily, "BASE_DIR", self.base)]
         for item in self.patches:
@@ -141,13 +151,13 @@ class DailyPublishTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "历史账本"):
             daily.reserve(self.path, "douyin", "manual")
 
-    def test_channels_workspace_block_cannot_be_overridden_by_tool_config(self):
+    def test_channels_legacy_workspace_policy_does_not_block_manual_publish(self):
         (self.base / "publishing.json").write_text(json.dumps({"platforms": {"wechat_channels": {
             "enabled": True, "access_status": "blocked_browser_policy", "account_id": "123"}}}), encoding="utf-8")
         package = daily.load_package(self.path)
-        self.assertEqual(daily.status_for(package)["wechat_channels"]["access_status"], "blocked_browser_policy")
-        with self.assertRaisesRegex(ValueError, "访问或账号核验"):
-            daily.reserve(self.path, "wechat_channels", "manual")
+        self.assertEqual(daily.status_for(package)["wechat_channels"]["access_status"], "ready")
+        job_id = daily.reserve(self.path, "wechat_channels", "manual")
+        self.assertEqual(daily.task(job_id)["source"], "manual")
 
     def test_manual_draft_cannot_remove_required_ai_declaration(self):
         data = daily.load_package(self.path)["platforms"]["douyin"]

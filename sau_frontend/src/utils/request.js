@@ -1,9 +1,13 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { normalizeApiError } from './requestErrors.js'
+
+// 桌面版可以使用独立端口，登录流和普通请求必须连接同一个服务。
+export const apiBaseUrl = import.meta.env?.VITE_API_BASE_URL || (import.meta.env?.PROD ? window.location.origin : 'http://localhost:5409')
 
 // 创建axios实例
 const request = axios.create({
-  baseURL: import.meta.env?.VITE_API_BASE_URL || 'http://localhost:5409',
+  baseURL: apiBaseUrl,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -20,53 +24,27 @@ request.interceptors.request.use(
     return config
   },
   (error) => {
-    console.error('请求错误:', error)
     return Promise.reject(error)
   }
 )
 
-// 响应拦截器
+// Pages with inline feedback opt out of global toasts to avoid duplicate errors.
+function rejectApiError(error, config) {
+  const normalized = normalizeApiError(error)
+  if (config?.silentError !== true) ElMessage.error(normalized.message)
+  return Promise.reject(normalized)
+}
+
 request.interceptors.response.use(
-  (response) => {
+  response => {
     const { data } = response
-    
-    // 根据后端接口规范处理响应
-    if (data.code === 200 || data.success) {
-      return data
-    } else {
-      ElMessage.error(data.msg || data.message || '请求失败')
-      return Promise.reject(new Error(data.msg || data.message || '请求失败'))
-    }
+    if (data?.code === 200 || data?.success === true) return data
+    const error = new Error()
+    error.response = response
+    error.config = response.config
+    return rejectApiError(error, response.config)
   },
-  (error) => {
-    console.error('响应错误:', error)
-    
-    // 处理HTTP错误状态码
-    if (error.response) {
-      const { status } = error.response
-      switch (status) {
-        case 401:
-          ElMessage.error('未授权，请重新登录')
-          // 可以在这里处理登录跳转
-          break
-        case 403:
-          ElMessage.error('拒绝访问')
-          break
-        case 404:
-          ElMessage.error('请求地址不存在')
-          break
-        case 500:
-          ElMessage.error('服务器内部错误')
-          break
-        default:
-          ElMessage.error('网络错误')
-      }
-    } else {
-      ElMessage.error('网络连接失败')
-    }
-    
-    return Promise.reject(error)
-  }
+  error => rejectApiError(error, error.config)
 )
 
 // 封装常用的请求方法

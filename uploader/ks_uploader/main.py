@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from patchright.async_api import Page
 from patchright.async_api import Playwright
@@ -32,6 +34,26 @@ KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 KUAISHOU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
 KUAISHOU_UPLOAD_TIMEOUT_SECONDS = 480
 KUAISHOU_PUBLISH_ATTEMPTS = 3
+KUAISHOU_SUBMIT_TIMEOUT_SECONDS = 40
+
+
+def normalize_topics(description, tags):
+    """Old daily descriptions already contain hashtags; append each topic only once."""
+    selected, seen = [], set()
+    def add(value):
+        tag = value.strip().strip('#')
+        if tag and tag.casefold() not in seen:
+            seen.add(tag.casefold())
+            selected.append(tag)
+    for tag in tags or []:
+        add(tag)
+    def remove_inline(match):
+        add(match.group(1))
+        return ''
+    text = re.sub(r'(?<![\w])#([^\s#，。！？,;；:：]+)#?', remove_inline, description or '')
+    if len(selected) > 3:
+        raise ValueError('快手当前投稿通道最多使用 3 个话题，请合并简介和话题栏中的重复项并减少话题')
+    return '\n'.join(line.rstrip() for line in text.splitlines()).strip(), selected
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -520,6 +542,8 @@ class KSVideo(KSBaseUploader):
         thumbnail_path=None,
         desc: str | None = None,
         collection_name: str | None = None,
+        single_submission: bool = False,
+        progress_callback=None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -530,10 +554,41 @@ class KSVideo(KSBaseUploader):
         )
         self.title = title
         self.file_path = file_path
-        self.tags = tags or []
+        self.desc, self.tags = normalize_topics(desc, tags)
         self.thumbnail_path = thumbnail_path
-        self.desc = desc or ""
         self.collection_name = collection_name
+        self.single_submission = single_submission
+        self.progress_callback = progress_callback
+
+    def report_progress(self, stage, message):
+        if self.progress_callback:
+            self.progress_callback({"stage": stage, "message": message})
+
+    async def submit_once(self, page):
+        # Once the final button is attempted, never click it again on timeout.
+        self.report_progress("submitting", "正在提交快手作品；结果不明时不会自动重投")
+        confirmed = False
+        try:
+            await page.get_by_text("发布", exact=True).click(timeout=8000)
+            deadline = asyncio.get_running_loop().time() + KUAISHOU_SUBMIT_TIMEOUT_SECONDS
+            while asyncio.get_running_loop().time() < deadline:
+                url = urlsplit(page.url)
+                if url.hostname == 'cp.kuaishou.com' and url.path.rstrip('/') == '/article/manage/video':
+                    self.report_progress("confirming", "已返回快手内容管理，仍需核对作品与审核状态")
+                    return
+                errors = page.locator('.ant-message-error:visible, .ant-form-item-explain-error:visible')
+                if await errors.count():
+                    message = '；'.join(await errors.all_inner_texts()).strip()
+                    raise RuntimeError(f'快手提交校验未通过：{message[:500]}')
+                if not confirmed:
+                    confirmed = await _click_visible_publish_confirm(page)
+                await page.wait_for_timeout(200)
+            phase = '已确认发布' if confirmed else '未观察到确认发布弹窗'
+            raise TimeoutError(f'快手提交后未返回作品管理（{phase}），结果待核对，不会自动重投')
+        except Exception as exc:
+            evidence = await _dump_page_debug(page, 'submit_once')
+            # Preserve the actual validation/timeout as the cause before closing the browser.
+            raise RuntimeError(f'{exc}；现场已保存：{evidence}') from exc
 
     async def apply_collection(self, page: Page) -> None:
         """在发布表单页选择"加入合集"下拉框（Ant Design Select，label 属性=合集名）。
@@ -592,27 +647,12 @@ class KSVideo(KSBaseUploader):
 
         kuaishou_logger.info(_msg("🖼️", "小人准备设置封面"))
 
-        cover_label = page.locator("span").filter(has_text="封面设置")
-        await cover_label.wait_for(state="visible", timeout=30000)
-        await cover_label.locator("xpath=../following-sibling::div[1]").locator('div').nth(0).click()
-
-        modal = page.locator('div[role="document"].ant-modal')
-        await modal.wait_for(state="visible", timeout=30000)
-
-        upload_cover_tab = modal.get_by_text("上传封面", exact=True)
-        await upload_cover_tab.wait_for(state="visible", timeout=10000)
-        await upload_cover_tab.click()
-
-        file_input = modal.locator('input[type="file"]')
-        await file_input.wait_for(state="attached", timeout=30000)
-        await file_input.set_input_files(self.thumbnail_path)
-        await asyncio.sleep(1)
-
-        confirm_button = modal.get_by_role("button", name="确认", exact=True)
-        await confirm_button.wait_for(state="visible", timeout=10000)
-        await confirm_button.click()
-
-        await modal.wait_for(state="hidden", timeout=30000)
+        from uploader.ks_uploader.cover_controls import set_custom_cover
+        try:
+            await set_custom_cover(page, self.thumbnail_path)
+        except Exception as exc:
+            evidence = await _dump_page_debug(page, 'cover-mismatch')
+            raise RuntimeError(f"快手自定义封面未保存，已停止投稿：{exc}；诊断：{evidence}") from exc
         kuaishou_logger.success(_msg("🥳", "封面已经设置完成"))
 
     async def upload(self, playwright: Playwright) -> None:
@@ -636,6 +676,7 @@ class KSVideo(KSBaseUploader):
         upload_success = False
         try:
             page = await context.new_page()
+            self.report_progress("opening", "正在打开快手创作者后台")
             await page.goto(KUAISHOU_UPLOAD_URL)
             kuaishou_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
             kuaishou_logger.info(_msg("🧭", "小人正在赶往快手上传主页"))
@@ -647,6 +688,7 @@ class KSVideo(KSBaseUploader):
             async with page.expect_file_chooser() as fc_info:
                 await upload_button.click()
             file_chooser = await fc_info.value
+            self.report_progress("uploading", "正在上传快手视频")
             await file_chooser.set_files(self.file_path)
 
             await asyncio.sleep(2)
@@ -670,7 +712,7 @@ class KSVideo(KSBaseUploader):
             await page.keyboard.type(self.desc or self.title)
             await page.keyboard.press("Enter")
 
-            for index, tag in enumerate(self.tags[:3], start=1):
+            for index, tag in enumerate(self.tags, start=1):
                 kuaishou_logger.info(_msg("🏷️", f"小人正在添加第 {index} 个话题: #{tag}"))
                 await page.keyboard.type(f"#{tag} ")
                 await asyncio.sleep(2)
@@ -701,12 +743,18 @@ class KSVideo(KSBaseUploader):
                     f"等待快手视频上传完成超时（>{KUAISHOU_UPLOAD_TIMEOUT_SECONDS}秒），已停止发布"
                 )
 
+            self.report_progress("metadata", "正在设置快手封面与文案")
             await self.set_thumbnail(page)
 
             await self.apply_collection(page)
 
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
+
+            if self.single_submission:
+                await self.submit_once(page)
+                upload_success = True
+                return
 
             last_publish_error = None
             for attempt in range(1, KUAISHOU_PUBLISH_ATTEMPTS + 1):

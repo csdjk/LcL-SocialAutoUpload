@@ -5,11 +5,14 @@ import asyncio
 import inspect
 import os
 import sys
+import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from patchright.async_api import Page
-from patchright.async_api import Playwright
-from patchright.async_api import async_playwright
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import Page
+from playwright.async_api import Playwright
+from playwright.async_api import async_playwright
 
 from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
@@ -20,6 +23,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import douyin_logger
+from utils.douyin_credentials import inspect_douyin_authenticated_page, validate_douyin_credentials
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 DOUYIN_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
@@ -89,11 +93,11 @@ async def _native_click(page, locator) -> bool:
         return False
 
 
-async def _emit_qrcode_callback(qrcode_callback, payload: dict):
-    if not qrcode_callback:
+async def _emit_login_callback(callback, payload: dict):
+    if not callback:
         return
 
-    callback_result = qrcode_callback(payload)
+    callback_result = callback(payload)
     if inspect.isawaitable(callback_result):
         await callback_result
 
@@ -112,26 +116,8 @@ def _build_login_result(success: bool, status: str, message: str, account_file: 
 async def cookie_auth(account_file):
     if not os.path.exists(account_file):
         return False
-
-    use_headless = os.environ.get("DOUYIN_COOKIE_AUTH_HEADLESS", "true").lower() in ("1", "true", "yes")
-    launch_kwargs = {"headless": use_headless, "channel": "chromium", "args": ["--no-sandbox", "--disable-blink-features=AutomationControlled"]}
-    for _attempt in range(3):
-        async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(**launch_kwargs)
-            try:
-                context = await browser.new_context(storage_state=account_file)
-                context = await set_init_script(context)
-                page = await context.new_page()
-                await page.goto("https://creator.douyin.com/creator-micro/content/upload", wait_until="domcontentloaded", timeout=90000)
-                await page.wait_for_timeout(2500)  # 等页面稳定，避免瞬时跳转误判
-                has_login = await page.get_by_text("手机号登录").count() or await page.get_by_text("扫码登录").count()
-                if "content/upload" in page.url and not has_login:
-                    return True
-            except Exception:
-                pass
-            finally:
-                await browser.close()
-    return False
+    result = await validate_douyin_credentials(account_file)
+    return result["success"]
 
 
 async def douyin_setup(account_file, handle=False, return_detail=False, qrcode_callback=None, headless: bool = LOCAL_CHROME_HEADLESS, cdp_url: str | None = None):
@@ -148,38 +134,19 @@ async def douyin_setup(account_file, handle=False, return_detail=False, qrcode_c
 
 
 async def _extract_douyin_qrcode_src(page: Page) -> str:
-    # 等 SPA 加载完成（不只等"扫码登录"文字，否则抖音慢加载时 30s 就超时）。
-    # 给 domcontentloaded 后足够时间让客户端 JS 注入登录卡。
-    try:
-        await page.wait_for_load_state("networkidle", timeout=15000)
-    except Exception:
-        pass
-    scan_login_tab = page.get_by_text("扫码登录", exact=True).first
-    # attached 状态：DOM 里出现即可，不要求 visible/渲染完整，避免 race
-    await scan_login_tab.wait_for(state="attached", timeout=60000)
-
-    # 新版抖音创作者中心 (single_tab + animate_qrcode_container) 不再用 aria-label="二维码"。
-    # 按优先级兜底多个 selector，至少一个能命中即可。
-    qrcode_selectors = [
+    # 二维码一出现就回传；无需等待持续请求的 SPA 进入 networkidle。
+    selectors = [
         'div#animate_qrcode_container img[src^="data:image"]',
         'div[class*="animate_qrcode_container"] img[src^="data:image"]',
         'div[class*="scan_qrcode_login_content"] img[src^="data:image"]',
-        'img[aria-label="二维码"]',
+        'img[aria-label="二维码"][src^="data:image"]',
     ]
-    last_err: Exception | None = None
-    for sel in qrcode_selectors:
-        qrcode_img = page.locator(sel).first
-        try:
-            await qrcode_img.wait_for(state="attached", timeout=10000)
-        except Exception as e:
-            last_err = e
-            continue
-        src = await qrcode_img.get_attribute("src")
-        if src:
-            return src
-        last_err = RuntimeError(f"selector {sel} 命中但 src 为空")
-
-    raise RuntimeError(f"未获取到抖音登录二维码地址 (last_err={last_err})")
+    image = page.locator(", ".join(selectors)).first
+    await image.wait_for(state="attached", timeout=30000)
+    src = await image.get_attribute("src")
+    if not src or not src.startswith("data:image/"):
+        raise RuntimeError("抖音登录二维码图片尚未就绪")
+    return src
 
 
 async def _save_douyin_qrcode(page: Page, account_file: str, previous_qrcode_path: Path | None = None, qrcode_callback=None) -> dict:
@@ -194,64 +161,117 @@ async def _save_douyin_qrcode(page: Page, account_file: str, previous_qrcode_pat
         if remove_qrcode_file(previous_qrcode_path):
             douyin_logger.info(_msg("🧹", f"临时二维码文件已清理: {previous_qrcode_path}"))
     douyin_logger.info(_msg("🖼️", f"二维码已经准备好啦，已保存到: {qrcode_path}"))
-    qrcode_content = decode_qrcode_from_path(qrcode_path)
-    if qrcode_content:
-        print_terminal_qrcode(qrcode_content, qrcode_path, "抖音APP")
-    else:
-        douyin_logger.warning(_msg("😵", f"终端没法完整显示二维码，请打开 {qrcode_path} 扫码"))
+    if not qrcode_callback:
+        qrcode_content = decode_qrcode_from_path(qrcode_path)
+        if qrcode_content:
+            print_terminal_qrcode(qrcode_content, qrcode_path, "抖音APP")
+        else:
+            douyin_logger.warning(_msg("😵", f"终端没法完整显示二维码，请打开 {qrcode_path} 扫码"))
     qrcode_info = {
         "image_path": str(qrcode_path),
         "image_data_url": qrcode_src,
     }
-    await _emit_qrcode_callback(qrcode_callback, qrcode_info)
+    await _emit_login_callback(qrcode_callback, qrcode_info)
     return qrcode_info
 
 
 async def _is_douyin_login_completed(page: Page) -> bool:
-    # 登录后会跳到 creator-micro 下任意页（home/content 等）；登录页是 creator.douyin.com/ 根路径
-    if "creator.douyin.com/creator-micro" not in page.url:
-        return False
-
-    login_markers = [
-        page.get_by_text("扫码登录", exact=True).first,
-        page.get_by_text("手机号登录", exact=True).first,
-        page.get_by_text("二维码失效", exact=True).first,
-        page.get_by_role("img", name="二维码").first,
-    ]
-
-    for marker in login_markers:
-        if not await marker.count():
-            continue
-        try:
-            if await marker.is_visible():
-                return False
-        except Exception:
-            continue
-
-    return True
+    return await inspect_douyin_authenticated_page(page) == "valid"
 
 
-async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, poll_interval: int = 3, max_checks: int = 100) -> dict:
+async def _observe_douyin_login_response(response, state: dict, status_callback=None, *, interactive=False):
+    """只观察官方页面自己的扫码回执，不另行请求登录接口或保存响应凭据。"""
+    url = urlsplit(response.url)
+    if url.hostname != "creator.douyin.com" or url.path.rstrip("/") != "/passport/web/check_qrconnect":
+        return
+    if state.get("failure"):
+        return
+    if response.status != 200:
+        state["failure"] = {"status": "network_error", "message": f"抖音登录确认请求失败（HTTP {response.status}），请检查网络后重试"}
+        return
+    try:
+        payload = await response.json()
+    except (PlaywrightError, ValueError) as exc:
+        douyin_logger.warning(f"无法读取抖音扫码回执：{type(exc).__name__}")
+        if interactive:
+            # Navigation may discard an earlier QR response while the official page
+            # finishes a challenge. Keep the user's window open and require positive
+            # authenticated-page evidence; never infer success from this exception.
+            await _emit_login_callback(status_callback, {
+                "stage": "browser_wait", "message": "请继续在官方窗口完成登录，工具会检查最终登录状态",
+            })
+        else:
+            state["failure"] = {"status": "response_error", "message": "无法读取抖音登录确认结果，请重新扫码"}
+        return
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        state["failure"] = {"status": "response_error", "message": "抖音登录确认结果格式异常，请重试"}
+        return
+
+    code = data.get("error_code", 0)
+    if code not in (0, "0", None) or payload.get("message") == "error":
+        security_required = str(code) == "2046"
+        reason = data.get("description") or "平台未允许此次电脑端登录"
+        status = "verification_required" if security_required else "rejected"
+        message = f"抖音{'要求安全验证' if security_required else '拒绝登录'}（错误码 {code}）：{reason}"
+        if security_required and interactive:
+            # 2046 会触发官方 SDK 加载二次验证界面，不能在界面出现前关闭浏览器。
+            state["verification_required"] = True
+            douyin_logger.warning(message)
+            await _emit_login_callback(status_callback, {
+                "stage": status,
+                "message": "抖音已收到扫码，请在打开的官方窗口完成额外身份验证；完成后账号会自动保存。",
+            })
+            return
+        state["failure"] = {"status": status, "message": message}
+        douyin_logger.warning(message)
+        await _emit_login_callback(status_callback, {"stage": status, "message": message})
+        return
+
+    stages = {
+        "scanned": ("scanned", "抖音已收到扫码，请在手机上确认登录"),
+        "confirmed": ("verifying", "手机已确认，正在等待抖音建立电脑端登录"),
+    }
+    stage, message = stages.get(data.get("status"), (None, None))
+    if stage and state.get("stage") != stage:
+        state["stage"] = stage
+        douyin_logger.info(message)
+        await _emit_login_callback(status_callback, {"stage": stage, "message": message})
+
+
+async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dict, qrcode_callback=None, status_callback=None, poll_interval: int = 3, max_checks: int = 100, login_state=None, interactive=False) -> dict:
+    if login_state is None:
+        login_state = {}
     qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
     original_url = page.url
     saw_2fa = False
+    saw_navigation = False
     for _ in range(max_checks):
-        if await _is_douyin_login_completed(page):
+        # 手机确认后仍可能被平台拒绝，而且主页 URL 不会变化；应立即返回真实原因。
+        if failure := login_state.get("failure"):
+            return _build_login_result(False, failure["status"], failure["message"], account_file, qrcode_info, page.url)
+        if interactive and page.is_closed():
+            return _build_login_result(False, "cancelled", "抖音官方窗口已关闭，账号尚未保存", account_file, qrcode_info)
+        completed = await _is_douyin_login_completed(page)
+        if completed:
             douyin_logger.info(_msg("🥳", f"扫码成功，已经跳转到登录后页面: {page.url}"))
             return _build_login_result(True, "success", "抖音扫码登录成功", account_file, qrcode_info, page.url)
 
-        # URL 变化 + sessionid 未到位 → 二验流程，继续等
-        if page.url != original_url and not await _is_douyin_login_completed(page):
-            sms_input = page.locator('input[placeholder*="验证码"], input[type="tel"], input[placeholder*="短信"], input[placeholder*="手机号"]')
-            if await sms_input.count() > 0:
-                if not saw_2fa:
-                    douyin_logger.warning(_msg("⚠️", f"检测到抖音短信/安全二次验证，请在弹出的浏览器中手动输入。等待 sessionid ({_}/{max_checks})"))
-                    saw_2fa = True
+        # 页面已跳转但登录界面仍可见时，继续等待安全验证。
+        if page.url != original_url:
+            if not saw_navigation:
+                saw_navigation = True
+                await _emit_login_callback(status_callback, {"stage": "verifying", "message": "页面已跳转，正在确认抖音登录状态"})
+            sms_input = page.locator('input[placeholder*="验证码"], input[type="tel"], input[placeholder*="短信"], input[placeholder*="手机号"]').first
+            if not saw_2fa and await sms_input.count() and await sms_input.is_visible():
+                douyin_logger.warning(_msg("⚠️", "检测到抖音短信或安全二次验证"))
+                saw_2fa = True
+                await _emit_login_callback(status_callback, {"stage": "verification_required", "message": "抖音要求额外安全验证，等待验证完成"})
             await asyncio.sleep(poll_interval)
             continue
 
         expired_box = page.get_by_text("二维码失效", exact=True).locator("..").first
-        if await expired_box.count() and await expired_box.is_visible():
+        if not interactive and await expired_box.count() and await expired_box.is_visible():
             douyin_logger.warning(_msg("😵", "二维码失效了，小人马上去刷新"))
             await expired_box.click()
             await asyncio.sleep(1)
@@ -260,63 +280,97 @@ async def _wait_for_douyin_login(page: Page, account_file: str, qrcode_info: dic
 
         await asyncio.sleep(poll_interval)
 
-    return _build_login_result(False, "timeout", "等待抖音扫码登录超时", account_file, qrcode_info, page.url)
+    message = ("抖音官方窗口中的身份验证尚未完成，账号未保存；请重试并完成官方页面的验证" if interactive else
+               "抖音安全验证尚未完成" if saw_2fa else
+               "扫码后页面未完成登录跳转" if saw_navigation else
+               "抖音已收到扫码，但尚未确认电脑端登录成功" if login_state.get("stage") else
+               "等待扫码或手机确认超时")
+    douyin_logger.warning(_msg("⌛", f"扫码登录等待结束：页面已跳转={saw_navigation}，出现安全验证={saw_2fa}"))
+    return _build_login_result(False, "timeout", message, account_file, qrcode_info, page.url)
+
+
+async def _wait_for_session_cookie(context, timeout: float = 3) -> bool:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        cookies = await context.cookies("https://creator.douyin.com/")
+        if any(cookie.get("name") == "sessionid" and cookie.get("value") for cookie in cookies):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.2)
 
 async def douyin_cookie_gen(
     account_file,
     qrcode_callback=None,
-    poll_interval: int = 2,
-    max_checks: int = 60,
+    poll_interval: int = 1,
+    max_checks: int = 120,
     headless: bool = LOCAL_CHROME_HEADLESS,
     cdp_url: str | None = None,
+    status_callback=None,
+    interactive: bool = False,
 ):
+    started_at = time.monotonic()
     async with async_playwright() as playwright:
         if cdp_url:
             browser = await playwright.chromium.connect_over_cdp(cdp_url)
             context = browser.contexts[0] if browser.contexts else await browser.new_context()
             should_close_context = False
         else:
-            browser = await playwright.chromium.launch(headless=headless, channel="chromium")
+            options = {"headless": False if interactive else headless, "channel": "chrome" if interactive else "chromium"}
+            if interactive and LOCAL_CHROME_PATH:
+                options.pop("channel")
+                options["executable_path"] = LOCAL_CHROME_PATH
+            browser = await playwright.chromium.launch(**options)
             context = await browser.new_context()
             should_close_context = True
-        context = await set_init_script(context)
+        if not interactive:
+            context = await set_init_script(context)
         qrcode_path = None
         result = _build_login_result(False, "failed", "抖音登录失败", account_file)
         try:
             page = await context.new_page()
-            await page.goto("https://creator.douyin.com/")
-            qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+            login_state = {}
+
+            async def on_login_response(response):
+                await _observe_douyin_login_response(response, login_state, status_callback, interactive=interactive)
+
+            page.on("response", on_login_response)
+            await page.goto("https://creator.douyin.com/", wait_until="domcontentloaded", timeout=30000)
+            if interactive:
+                qrcode_info = {}
+                await _emit_login_callback(status_callback, {
+                    "stage": "browser_open",
+                    "message": "已打开抖音官方窗口，请在该窗口登录并完成验证；最长等待约 5 分钟，完成后账号会自动保存。",
+                })
+            else:
+                qrcode_info = await _save_douyin_qrcode(page, account_file, qrcode_callback=qrcode_callback)
+                if qrcode_callback and not qrcode_info.get("image_data_url"):
+                    raise RuntimeError("未获取到抖音登录二维码，请检查创作者中心页面")
+            douyin_logger.info(_msg("⏱️", f"{'官方登录窗口' if interactive else '二维码'}就绪耗时 {time.monotonic() - started_at:.2f} 秒"))
             qrcode_path = Path(qrcode_info["image_path"]) if qrcode_info.get("image_path") else None
             douyin_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
+            wait_started_at = time.monotonic()
             result = await _wait_for_douyin_login(
                 page,
                 account_file,
                 qrcode_info,
                 qrcode_callback=qrcode_callback,
+                status_callback=status_callback,
                 poll_interval=poll_interval,
                 max_checks=max_checks,
+                login_state=login_state,
+                interactive=interactive,
             )
+            douyin_logger.info(_msg("⏱️", f"扫码确认耗时 {time.monotonic() - wait_started_at:.2f} 秒，状态 {result['status']}"))
             if result["success"]:
-                await asyncio.sleep(2)
-                await context.storage_state(path=account_file)
-                # 登录已通过"发布视频"确认成功、storage_state 刚从已登录浏览器抓下来，
-                # 不再用 flaky 的浏览器重检（那正是导致成功被误判为失败的老 bug）。
-                # 只轻量确认文件里有 sessionid。
-                try:
-                    import json as _json
-                    _d = _json.load(open(account_file))
-                    _has_sess = any(c.get("name") == "sessionid" and c.get("value") for c in _d.get("cookies", []))
-                    if not _has_sess:
-                        result = _build_login_result(
-                            False,
-                            "cookie_invalid",
-                            "抖音扫码流程结束，但 cookie 中无 sessionid",
-                            account_file,
-                            qrcode_info,
-                            page.url,
-                        )
-                except Exception as _e:
-                    douyin_logger.warning(_msg("⚠️", f"cookie 文件校验异常（忽略，按成功处理）: {_e}"))
+                await _emit_login_callback(status_callback, {"stage": "saving", "message": "登录已确认，正在保存抖音账号"})
+                if await _wait_for_session_cookie(context):
+                    await context.storage_state(path=account_file)
+                else:
+                    result = _build_login_result(
+                        False, "cookie_invalid", "抖音页面已跳转，但登录凭据尚未生效",
+                        account_file, qrcode_info, page.url,
+                    )
         except Exception as exc:
             result = _build_login_result(False, "failed", str(exc), account_file, current_url=page.url if "page" in locals() else "")
         finally:
@@ -638,11 +692,12 @@ class DouYinVideo(DouYinBaseUploader):
         productTitle="",
         thumbnail_portrait_path=None,
         desc: str | None = None,
-        collection_name: str | None = None,
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         declaration: str | None = None,
+        collection_name: str | None = None,
+        progress_callback=None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -661,6 +716,7 @@ class DouYinVideo(DouYinBaseUploader):
         self.desc = desc or ""
         self.collection_name = collection_name
         self.declaration = declaration.strip() if declaration and declaration.strip() else None
+        self.progress_callback = progress_callback
 
     async def apply_self_declaration(self, page: Page) -> None:
         if not self.declaration:
@@ -969,18 +1025,34 @@ class DouYinVideo(DouYinBaseUploader):
 
 
     async def upload(self, playwright: Playwright) -> None:
-        douyin_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
-        douyin_logger.info(_msg("🥳", "上传前检查通过"))
+        # Reuse the same browser family as account login.
+        browser = await playwright.chromium.launch(headless=self.headless, channel="msedge")
+        context = None
+        try:
+            context = await browser.new_context(storage_state=str(self.account_file))
+            context = await set_init_script(context)
+            page = await context.new_page()
+            return await asyncio.wait_for(self._upload_page(page, context), timeout=1200)
+        except Exception as exc:
+            if 'page' in locals():
+                from publishing.diagnostics import capture
+                screenshot = await capture(page, 'douyin', 'failure')
+                if self.progress_callback:
+                    self.progress_callback({'screenshot': screenshot, 'error_type': type(exc).__name__})
+            raise
+        finally:
+            if context:
+                try:
+                    await context.close()
+                except Exception:
+                    douyin_logger.warning("抖音浏览器上下文关闭失败，继续关闭浏览器")
+            try:
+                await browser.close()
+            except Exception:
+                douyin_logger.warning("抖音浏览器已断开，保留投稿阶段及原始结果")
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chromium", args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
-        context = await browser.new_context(
-            storage_state=f"{self.account_file}",
-            permissions=["geolocation"],
-        )
-        context = await set_init_script(context)
-
-        page = await context.new_page()
+    async def _upload_page(self, page, context):
         await page.goto("https://creator.douyin.com/creator-micro/content/upload", wait_until="domcontentloaded", timeout=90000)
         douyin_logger.info(_msg("🏃", f"小人开始搬运视频: {self.title}.mp4"))
         douyin_logger.info(_msg("🧭", "小人正在赶往上传主页"))
@@ -1000,6 +1072,8 @@ class DouYinVideo(DouYinBaseUploader):
             upload_input = page.locator("div[class^='container'] input").first
         await upload_input.wait_for(state="attached", timeout=60000)
         await upload_input.set_input_files(self.file_path)
+        if self.progress_callback:
+            self.progress_callback({"stage": "uploading", "message": "抖音网页正在上传视频；等待平台确认完成"})
 
         while True:
             try:
@@ -1026,8 +1100,19 @@ class DouYinVideo(DouYinBaseUploader):
         await self.fill_title_and_description(page, self.title, self.desc, self.tags)
         douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags)} 个话题"))
 
+        last_media_percent = None
         while True:
             try:
+                if self.progress_callback:
+                    from publishing.progress import read_widget_percent
+                    percent = await read_widget_percent(page, 'div.progress-div')
+                    if percent is not None and percent != last_media_percent:
+                        self.progress_callback({"stage": "uploading", "message": f"抖音页面显示上传 {percent}%",
+                                                "media_percent": percent})
+                        last_media_percent = percent
+                    elif percent is None and last_media_percent is not None:
+                        self.progress_callback({"stage": "uploading", "message": "抖音页面暂未提供当前上传百分比"})
+                        last_media_percent = None
                 number = await page.locator('[class^="long-card"] div:has-text("重新上传")').count()
                 if number > 0:
                     douyin_logger.success(_msg("🥳", "视频已经传完啦"))
@@ -1036,11 +1121,16 @@ class DouYinVideo(DouYinBaseUploader):
                 await asyncio.sleep(2)
                 if await page.locator('div.progress-div > div:has-text("上传失败")').count():
                     douyin_logger.error(_msg("😵", "检测到上传失败，小人准备重试"))
+                    last_media_percent = None
+                    if self.progress_callback:
+                        self.progress_callback({"stage": "uploading", "message": "抖音页面提示上传失败，正在重试"})
                     await self.handle_upload_error(page)
             except Exception:
                 douyin_logger.debug(_msg("🧍", "小人还在等视频上传完成"))
                 await asyncio.sleep(2)
 
+        if self.progress_callback:
+            self.progress_callback({"stage": "metadata", "message": "视频已上传，正在完善抖音稿件信息"})
         if self.productLink and self.productTitle:
             douyin_logger.info(_msg("🛒", "小人正在设置商品链接"))
             await self.set_product_link(page, self.productLink, self.productTitle)
@@ -1048,8 +1138,6 @@ class DouYinVideo(DouYinBaseUploader):
 
         # 自主声明：本项目成片含 AI 生成内容（TTS 配音 / AI 字幕 / AI 前贴片），
         # 按平台合规如实选「内容由AI生成」（与转载等并列，单选，无二级选项、无需填来源）。
-        if not self.declaration:
-            self.declaration = "内容由AI生成"
         await self.apply_self_declaration(page)
 
         # 先归集：此时尚未打开封面弹窗，避免 dy-creator-content-portal 封面浮层拦截合集下拉
@@ -1057,6 +1145,8 @@ class DouYinVideo(DouYinBaseUploader):
         await self.apply_collection(page)
 
         # 再设封面（放最后，关掉弹窗，避免残留浮层挡住发布按钮）
+        if self.progress_callback:
+            self.progress_callback({"stage": "cover", "message": "正在设置抖音封面"})
         await self.set_thumbnail(page)
 
         third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
@@ -1067,57 +1157,17 @@ class DouYinVideo(DouYinBaseUploader):
         if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_douyin(page, self.publish_date)
 
-        sms_prompt_logged = False
-        while True:
-            try:
-                # 移除会拦截发布按钮点击的新手引导/话题下拉浮层
-                await page.evaluate(
-                    "() => { document.querySelectorAll('.shepherd-element, .shepherd-modal-overlay-container, [class*=\"mention-wrapper\"]').forEach(e => e.remove()); }"
-                )
-                # 检测并处理短信验证码弹窗
-                sms_input = page.locator('input[placeholder*="验证码"], input[type="tel"], input[placeholder*="短信"], input[placeholder*="手机号"]').first
-                if await sms_input.count() and await sms_input.is_visible():
-                    douyin_logger.warning(_msg("📱", "检测到短信验证码弹窗"))
-                    # 点击「获取验证码」按钮（仅首次）
-                    get_code_btn = page.get_by_text("获取验证码").first
-                    if await get_code_btn.count() and await get_code_btn.is_visible():
-                        await get_code_btn.click()
-                        douyin_logger.info(_msg("📤", "已点击「获取验证码」，请查看手机短信"))
-                    code_file = os.path.join(BASE_DIR, "verify_code.txt")
-                    code = await _read_verify_code(code_file)
-                    if code:
-                        sms_prompt_logged = False
-                        await self._submit_sms_verify_code(page, sms_input, code, code_file)
-                    elif not sms_prompt_logged:
-                        douyin_logger.warning(_msg("⏳", f"等待验证码输入；可在交互终端直接输入，或写入文件: {code_file}"))
-                        sms_prompt_logged = True
-
-                # ── 正常发布流程 ──
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click(force=True)
-                await page.wait_for_url(
-                    "https://creator.douyin.com/creator-micro/content/manage**",
-                    timeout=3000,
-                )
-                douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
-                break
-            except Exception:
-                await self.handle_auto_video_cover(page)
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布视频"))
-                if self.debug:
-                    await page.screenshot(full_page=True)
-                await asyncio.sleep(0.5)
-
+        from publishing.browser_submit import submit_once
+        await submit_once(page, progress=getattr(self, "progress_callback", None))
         await context.storage_state(path=self.account_file)
-        douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
-        await asyncio.sleep(2)
-        await context.close()
-        await browser.close()
+        from publishing.browser_readback import scan_context
+        from datetime import datetime, timezone, timedelta
+        return await scan_context(context, 'douyin', self.title, self.desc,
+                                  datetime.now(timezone(timedelta(hours=8))).date().isoformat())
 
     async def douyin_upload_video(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)
 
     async def main(self):
         await self.douyin_upload_video()

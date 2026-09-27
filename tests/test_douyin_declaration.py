@@ -72,6 +72,9 @@ class DouyinDeclarationTests(unittest.TestCase):
         page.goto = AsyncMock()
         page.wait_for_url = AsyncMock()
         page.wait_for_selector = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        locator.first = locator
+        locator.wait_for = AsyncMock()
         page.locator.return_value = locator
 
         context = MagicMock()

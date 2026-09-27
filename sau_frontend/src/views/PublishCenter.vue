@@ -309,12 +309,23 @@
           </div>
 
           <!-- 原创声明 -->
-          <div class="original-section">
+          <div v-if="tab.selectedPlatform !== 5" class="original-section">
             <el-checkbox
               v-model="tab.isOriginal"
               label="声明原创"
               class="original-checkbox"
             />
+          </div>
+
+          <div v-if="tab.selectedPlatform === 5" class="bilibili-options" data-testid="bilibili-publish-options">
+            <h3>B站投稿信息</h3>
+            <el-form label-position="top">
+              <el-form-item label="分区 ID（必填）"><el-input-number v-model="tab.biliTid" :min="1" :max="65535" :precision="0" placeholder="分区 ID" aria-label="B站分区 ID" /></el-form-item>
+              <el-form-item label="稿件类型（必选）"><el-radio-group v-model="tab.biliCopyright"><el-radio :value="1">自制</el-radio><el-radio :value="2">转载</el-radio></el-radio-group></el-form-item>
+              <el-form-item v-if="tab.biliCopyright === 2" label="转载来源（必填）"><el-input v-model="tab.biliSource" maxlength="200" placeholder="原作品链接或来源" /></el-form-item>
+              <el-form-item label="视频简介"><el-input v-model="tab.biliDescription" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="B站视频简介" /></el-form-item>
+            </el-form>
+            <p class="subtle">分区 ID 按 B 站实际投稿分区填写；话题区至少添加一个标签。当前入口不提供封面或 AI 声明设置，有相关要求时请使用官网投稿。</p>
           </div>
 
           <!-- 草稿选项 (仅在视频号可见) -->
@@ -355,7 +366,7 @@
               type="textarea"
               :rows="3"
               placeholder="请输入标题"
-              maxlength="100"
+              :maxlength="tab.selectedPlatform === 5 ? 80 : 100"
               show-word-limit
               class="title-input"
             />
@@ -546,7 +557,8 @@ const platforms = [
   { key: 3, name: '抖音' },
   { key: 4, name: '快手' },
   { key: 2, name: '视频号' },
-  { key: 1, name: '小红书' }
+  { key: 1, name: '小红书' },
+  { key: 5, name: 'B站' }
 ]
 
 const defaultTabInit = {
@@ -557,6 +569,7 @@ const defaultTabInit = {
   selectedAccounts: [], // 选中的账号ID列表
   selectedPlatform: 1, // 选中的平台（单选）
   title: '',
+  biliTid: null, biliCopyright: null, biliSource: '', biliDescription: '',
   productLink: '', // 商品链接
   productTitle: '', // 商品名称
   selectedTopics: [], // 话题列表（不带#号）
@@ -829,6 +842,13 @@ const confirmPublish = async (tab) => {
     throw new Error('发布账号无效')
   }
 
+  if (tab.selectedPlatform === 5) {
+    const message = !Number.isInteger(tab.biliTid) || tab.biliTid < 1 ? '请填写 B站分区 ID'
+      : ![1, 2].includes(tab.biliCopyright) ? '请选择 B站稿件类型'
+      : tab.biliCopyright === 2 && !tab.biliSource.trim() ? '请填写转载来源'
+      : !tab.selectedTopics.length ? '请至少添加一个 B站标签' : ''
+    if (message) { tab.publishing = false; ElMessage.error(message); throw new Error(message) }
+  }
   // 构造发布数据，符合后端API格式
   const publishData = {
     type: tab.selectedPlatform,
@@ -846,14 +866,15 @@ const confirmPublish = async (tab) => {
     category: tab.isOriginal ? 1 : 0, // 1表示原创，0表示非原创
     productLink: tab.productLink.trim() || '',
     productTitle: tab.productTitle.trim() || '',
-    isDraft: tab.isDraft
+    isDraft: tab.selectedPlatform === 2 && tab.isDraft,
+    ...(tab.selectedPlatform === 5 ? { tid: tab.biliTid, copyright: tab.biliCopyright, source: tab.biliSource, description: tab.biliDescription } : {})
   }
 
   // 调用后端发布API（使用统一的http封装）
   try {
     const data = await http.post('/postVideo', publishData)
     tab.publishStatus = {
-      message: '旧版上传流程已返回；请到平台内容管理核对真实作品与审核状态。',
+      message: tab.selectedPlatform === 5 ? (data.msg || '请到 B站创作中心核对稿件与审核状态') : '旧版上传流程已返回；请到平台内容管理核对真实作品与审核状态。',
       type: 'warning'
     }
   } catch (error) {

@@ -2,7 +2,7 @@ import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { accountApi } from '../api/account.js'
 
-export const platformTypes = { 1: '小红书', 2: '视频号', 3: '抖音', 4: '快手' }
+export const platformTypes = { 1: '小红书', 2: '视频号', 3: '抖音', 4: '快手', 5: 'B站', 6: 'YouTube', 7: '今日头条' }
 
 export function normalizeAccounts(rows) {
   return rows.map(item => {

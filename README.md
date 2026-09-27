@@ -1,5 +1,7 @@
 # social-auto-upload
 
+本机 AI 日报入口：[本机发布与 MCP](docs/本机发布与MCP.md)。桌面窗口、托盘、普通视频导入及可选自动排程见[桌面版与自动排程](docs/桌面版与自动排程.md)。保留当前日报资源包格式，支持三平台账号绑定、页面一键投稿、持久队列与 Codex MCP，共用防重复投稿账本。[本轮验收记录](docs/本机发布验收记录.md)。
+
 `social-auto-upload` 是一个强大的自动化工具，旨在帮助内容创作者和运营者高效地将视频内容一键发布到多个国内外主流社交媒体平台。
 项目实现了对 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号`、`支付宝生活号`、`微博`、`虎扑`、`TikTok` 以及 `YouTube` 等平台的视频上传、定时发布等功能。
 结合各平台 `uploader` 模块，您可以轻松配置和扩展支持的平台，并通过示例脚本快速上手。
@@ -216,7 +218,9 @@ sau youtube check --account <account_name>
 sau youtube upload-video --account <account_name> --file videos/demo.mp4 --title "示例标题" --desc "示例简介" --tags tag1,tag2 --playlist "我的系列" --visibility public
 ```
 
-> YouTube 说明：登录是交互式的（Google 账号，浏览器里完成，无二维码）。这里走浏览器自动化而不是官方 API，
+> 桌面工作台和统一发布队列的 YouTube 已改为官方 OAuth + Data API，请先阅读 [YouTube 官方授权配置](docs/YouTube官方授权配置.md)。上面的旧 `sau youtube` CLI 仍是独立的浏览器实现，Google 可能拒绝其登录；请使用工作台入口。
+>
+> 旧 CLI YouTube 说明：登录是交互式的（Google 账号，浏览器里完成，无二维码）。这里走浏览器自动化而不是官方 API，
 > 是因为**未通过 Google 合规审核的 API 项目上传的视频会被强制锁为私享、无法改公开**，对个人/单频道不实用；
 > 浏览器自动化没有此限制，可直接发布公开视频，也与本项目其它平台的 cookie 方案一致。
 > `--playlist` 适合连载/系列追更；`--visibility` 可选 `public`/`unlisted`/`private`。
