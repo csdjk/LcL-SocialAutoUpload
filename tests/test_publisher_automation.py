@@ -57,10 +57,22 @@ def test_three_platforms_reserve_once_and_share_ledger(case):
         assert all(row["source"] == "automation" and json.loads(row["payload"])["one_click"] for row in attempts)
         assert conn.execute("SELECT COUNT(*) FROM delivery_queue").fetchone()[0] == 3
     status = automation.status(now)
-    assert set(status["events"]) == set(daily.PLATFORMS)
+    assert set(status["events"]) == set(daily.DAILY_PLATFORMS)
     token = service.today()["selection_id"]
     result = service.publish_daily(token, ["bilibili"])
     assert not result["jobs"] and result["errors"]["bilibili"]
+
+
+def test_legacy_xiaohongshu_schedule_is_ignored(case):
+    config = automation.read_settings()
+    config["enabled"] = True
+    config["platforms"]["xiaohongshu"] = {"enabled": True, "verified": True}
+    automation.save_settings(config)
+    now = datetime(2026, 9, 23, 8, tzinfo=daily.BEIJING)
+    with patch.object(daily, "reserve") as reserve:
+        assert automation.tick(now) == []
+    reserve.assert_not_called()
+    assert "xiaohongshu" not in automation.status(now)["events"]
 
 
 def test_scheduler_waits_for_window_and_does_not_take_worker_pause_as_permission(case):

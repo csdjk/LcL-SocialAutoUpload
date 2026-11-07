@@ -14,6 +14,9 @@ def validate_cover_contract(package, root):
         'wechat_channels': {'cover_landscape': (4, 3), 'cover_portrait': (3, 4)},
         'youtube': {'cover': (16, 9)}, 'toutiao': {'cover': (16, 9)}, 'kuaishou': {'cover': (3, 4)},
     }
+    # Existing eight-cover packages remain immutable and valid.
+    if 'xiaohongshu' in package.get('platforms', {}):
+        roles['xiaohongshu'] = {'cover': (3, 4)}
     for platform, fields in roles.items():
         material = package.get('platforms', {}).get(platform, {})
         for field, ratio in fields.items():

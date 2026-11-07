@@ -168,6 +168,9 @@ def serve(*, once=False):
         if not acquired:
             return
         recover_interrupted()
+        from publishing import updates, replacements
+        updates.recover()
+        replacements.recover()
         next_scan = 0.0
         next_sync = time.monotonic() + 120
         while True:
@@ -187,10 +190,16 @@ def serve(*, once=False):
                     # Keep existing reserved work running; the worker log retains the cause.
                     traceback.print_exc()
             did_work = process_next()
+            if not did_work:
+                did_work = updates.process_next()
+            if not did_work:
+                did_work = replacements.process_next()
             if not once and not did_work and time.monotonic() >= next_sync:
                 next_sync = time.monotonic() + 300
                 try:
                     sync_pending()
+                    updates.sync_pending()
+                    replacements.sync_pending()
                 except Exception:
                     traceback.print_exc()
             if once and not did_work:

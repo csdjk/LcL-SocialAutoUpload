@@ -151,7 +151,7 @@ async def inspect_douyin_authenticated_page(page):
             return 'invalid'
     if not parsed.path.startswith('/creator-micro/'):
         return 'pending'
-    for text in ('发布视频', '发布作品', '退出登录'):
+    for text in ('发布视频', '发布作品', '作品发布', '退出登录'):
         if await _visible(page, page.get_by_text(text, exact=True)):
             return 'valid'
     for selector in ('a[href*="/creator-micro/content/manage"]', 'a[href*="/creator-micro/content/upload"]'):
@@ -176,7 +176,9 @@ async def validate_douyin_credentials(account_file, *, timeout=30, require_name=
             if LOCAL_CHROME_PATH:
                 options['executable_path'] = LOCAL_CHROME_PATH
             else:
-                options['channel'] = 'chrome'
+                # Match the browser used by the publishing workflow. Chrome is
+                # optional on Windows and must not be required for validation.
+                options['channel'] = 'msedge'
             browser = await p.chromium.launch(**options)
             try:
                 context = await browser.new_context(storage_state=str(account_file))
@@ -213,4 +215,4 @@ async def validate_douyin_credentials(account_file, *, timeout=30, require_name=
     except Exception:
         # Playwright exception text can contain a URL or stored state; never expose it.
         return {'success': False, 'status': 'verification_error',
-            'message': '无法完成验证，账号未保存。请确认本机 Chrome 可运行，并能打开抖音创作者中心'}
+            'message': '无法完成验证，账号未保存。请确认本机浏览器可运行，并能打开抖音创作者中心'}

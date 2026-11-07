@@ -35,3 +35,16 @@ def test_missing_cover_and_budget_fail_closed(tmp_path):
     del package['assets']['kuaishou']
     with pytest.raises(ValueError,match='映射'): validate_cover_contract(package,tmp_path)
     validate_cover_contract({'assets':{}},tmp_path)  # unchanged old-edition path
+
+
+def test_explicit_xiaohongshu_cover_is_required_and_portrait(tmp_path):
+    package = fixture(tmp_path)
+    validate_cover_contract(package, tmp_path)  # old eight-cover package stays valid
+    package['platforms']['xiaohongshu'] = {'cover': 'xiaohongshu'}
+    with pytest.raises(ValueError, match='xiaohongshu.*映射'):
+        validate_cover_contract(package, tmp_path)
+    package['assets']['xiaohongshu'] = dict(package['assets']['portrait'])
+    validate_cover_contract(package, tmp_path)
+    package['assets']['xiaohongshu'] = dict(package['assets']['landscape'])
+    with pytest.raises(ValueError, match='xiaohongshu.*比例'):
+        validate_cover_contract(package, tmp_path)

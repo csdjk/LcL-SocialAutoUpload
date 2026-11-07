@@ -12,7 +12,7 @@ import secrets
 import sqlite3
 import time
 import uuid
-import webbrowser
+import asyncio
 from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -242,9 +242,16 @@ def authorize(base, queue, account_id=None, *, timeout=300):
             'code_challenge_method': 'S256', 'access_type': 'offline', 'prompt': 'consent select_account'})
         if queue.cancelled.is_set():
             return
-        if not webbrowser.open(url, new=1):
-            raise YouTubeError('无法打开系统默认浏览器，请检查默认浏览器设置后重试')
-        queue.put({'event': 'login-status', 'data': {'stage': 'browser_open', 'message': '请在默认浏览器选择 Google 账号及 YouTube 频道，并允许上传和读取权限'}})
+        from myUtils.ego_login import _ego_call, BrowserLoginError
+        try:
+            opened = asyncio.run(_ego_call('start_oauth', {
+                'space_name': f'YouTube授权-{uuid.uuid4().hex[:12]}', 'url': url,
+            }, base))
+        except BrowserLoginError as exc:
+            raise YouTubeError(str(exc)) from None
+        if opened.get('status') != 'browser_open':
+            raise YouTubeError('无法打开 Ego 授权页面，请检查 Ego 后重试')
+        queue.put({'event': 'login-status', 'data': {'stage': 'browser_open', 'message': '请在 Ego 选择 Google 账号及 YouTube 频道，并允许上传和读取权限'}})
         deadline = time.monotonic() + timeout
         while not callback and not queue.cancelled.is_set() and time.monotonic() < deadline:
             server.handle_request()

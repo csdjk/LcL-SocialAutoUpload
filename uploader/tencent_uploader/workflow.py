@@ -6,6 +6,7 @@ import re
 from urllib.parse import urlsplit
 from .flow import PublicationProgress, SubmissionNotStarted
 from .readback import scan_context
+from .session import ChannelsSession, login_required
 
 class EditorPage:
     """Locators belong to the editor frame; keyboard/browser events to its page."""
@@ -66,7 +67,8 @@ async def run_video(app, playwright):
     flow = PublicationProgress(getattr(app,'progress_callback',None))
     app.publication_progress = flow
     flow.account_file = app.account_file
-    browser = None; context = None; result = None
+    context = None; result = None
+    session = ChannelsSession(app.account_file)
     try:
         await flow.emit('checking')
         if not Path(app.account_file).is_file():
@@ -82,19 +84,21 @@ async def run_video(app, playwright):
             raise flow.failure('发布时间设置无效。','material_invalid')
         if app.publish_strategy == 'scheduled':app.publish_date=app.validate_publish_date(app.publish_date)
         else:app.publish_date=0
-        browser = await playwright.chromium.launch(channel='msedge',headless=app.headless,timeout=20000)
-        context = await browser.new_context(storage_state=app.account_file,locale='zh-CN',viewport={'width':1440,'height':1000})
+        context = await session.open(playwright,headless=app.headless,viewport={'width':1440,'height':1000})
         day = getattr(app,'edition_day',None)
         if day:
             await flow.emit('deduplicating')
             check = await scan_context(context,app.title,app.desc,day)
+            session.authenticated = check['status'] in ('found', 'absent', 'ambiguous')
             if check['status'] == 'found': return {**check,'existing':True,'warnings':flow.warnings}
             if check['status'] != 'absent':
+                if check.get('auth_diagnostic'):
+                    await flow.emit(auth_diagnostic=check['auth_diagnostic'])
                 raise flow.failure(check['message'], 'login_check_failed' if check['status']=='needs_login' else 'remote_check_unavailable')
         page = await context.new_page()
         await flow.emit('opening')
         await app.open_upload_page(page)
-        if 'login' in urlsplit(page.url).path:
+        if login_required(page):
             raise flow.failure('视频号登录已失效，尚未上传，请重新登录。','login_check_failed')
         await flow.emit('uploading')
         flow.upload_started = True
@@ -129,6 +133,8 @@ async def run_video(app, playwright):
         for attempt in range(2):
             await asyncio.sleep(2 if attempt==0 else 4)
             result = await scan_context(context,app.title,app.desc,day,timeout=15)
+            if result['status'] in ('found', 'absent', 'ambiguous'):
+                session.authenticated = True
             if result['status']=='found':
                 return {**result,'existing':False,'warnings':flow.warnings}
         return {'status':'unknown','message':'已尝试发表，后台暂未返回可确认的作品记录。请点“同步后台结果”，不要重复投稿。','warnings':flow.warnings}
@@ -150,9 +156,5 @@ async def run_video(app, playwright):
         raise flow.failure(message,'cover_failed' if flow.stage=='cover' else 'prepare_failed') from None
     finally:
         # Do not overwrite a failure with a close/save exception.
-        if context is not None:
-            try: await asyncio.wait_for(context.close(),8)
-            except Exception: pass
-        if browser is not None:
-            try: await asyncio.wait_for(browser.close(),8)
-            except Exception: pass
+        try: await session.close()
+        except Exception: pass

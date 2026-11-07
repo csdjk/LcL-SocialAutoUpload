@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import daily_publish as daily
 from publishing import queue, transports
-from publishing.platforms import material_for, package_view
+from publishing.platforms import DAILY_PLATFORMS, material_for, package_view
 from publishing.runtime_version import LOADED_REVISION
 
 EDITABLE = {"title", "description", "tags", "short_title", "category", "ai_declaration", "cover_mode", "visibility", "made_for_kids"}
@@ -22,14 +22,38 @@ def _material(path, package, platform, account):
     return material
 
 
-def today(*, cached=True):
+def edition_package(edition_id):
+    """Resolve one explicit formal edition; a broken newest revision is an error."""
+    if not isinstance(edition_id, str):
+        raise ValueError('请指定期次日期 YYYY-MM-DD')
+    try:
+        parsed = daily.datetime.strptime(edition_id, '%Y-%m-%d').date()
+    except ValueError:
+        raise ValueError('期次日期须为 YYYY-MM-DD') from None
+    if parsed.isoformat() != edition_id or parsed > daily.datetime.now(daily.BEIJING).date():
+        raise ValueError('期次日期无效或尚未到达')
+    paths = sorted((daily.output_root() / edition_id).glob('r[0-9][0-9][0-9]/package.json'), reverse=True)
+    if not paths:
+        raise ValueError('该期次没有正式资源包')
+    path = paths[0].resolve()
+    package = daily.load_package(path)
+    if package.get('kind') == 'imported' or package['date'] != edition_id or package['edition_id'] != edition_id:
+        raise ValueError('资源包与指定正式期次不一致')
+    return path, package
+
+
+def today(*, cached=True, edition_id=None):
     daily.import_legacy(daily.output_root().parent / "publications.json")
-    path, package, errors = daily.find_today_cached() if cached else daily.find_today()
+    if edition_id is None:
+        path, package, errors = daily.find_today_cached() if cached else daily.find_today()
+    else:
+        path, package = edition_package(edition_id)
+        errors = []
     if not package:
         return {"package_path": None, "package": None, "status": {}, "drafts": {},
                 "errors": errors, "selection_id": None, "publishable_platforms": []}
     config = daily.settings()
-    statuses = daily.status_for(package)
+    statuses = {key: value for key, value in daily.status_for(package).items() if key in DAILY_PLATFORMS}
     drafts, selection, publishable = {}, {}, []
     for platform, item in statuses.items():
         account = item["account"]
@@ -67,7 +91,10 @@ def today(*, cached=True):
     # or package changes do. Repeated submissions still hit the atomic ledger gate.
     snapshot = {"manifest": daily.package_digest(package), "platforms": selection}
     token = hashlib.sha256(json.dumps(snapshot, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    from publishing.updates import summaries
+    updates = summaries(statuses, package['revision'])
     return {"package_path": str(path), "package": package_view(package), "status": statuses, "drafts": drafts,
+            "updates": updates,
             "errors": errors, "selection_id": token, "publishable_platforms": publishable,
             'runtime_revision': LOADED_REVISION}
 
@@ -85,7 +112,7 @@ def _start(jobs):
 
 def publish_daily(selection_id, platforms):
     if (not isinstance(platforms, list) or not platforms or len(platforms) != len(set(platforms))
-            or any(key not in daily.PLATFORMS for key in platforms)):
+            or any(key not in DAILY_PLATFORMS for key in platforms)):
         raise ValueError("请明确指定不重复的平台列表")
     bundle = today(cached=False)
     if not selection_id or not bundle["package"] or selection_id != bundle["selection_id"]:
@@ -197,7 +224,8 @@ def sync_result(ident):
         result = readback(current['remote_id'], account_path(daily.BASE_DIR, daily._account('youtube')))
         if result.get('status') == 'found':
             warnings = (current.get('evidence') or {}).get('warnings', [])
-            state = 'needs_action' if warnings and result['state'] == 'published' else result['state']
+            # A cover warning does not change the video's verified visibility.
+            state = result['state']
             # Reconciliation preserves the original video ID and prevents a second insert.
             proof = {'source': 'official_api_query', 'platform': 'youtube', 'account_id': current['account_id'],
                      'remote_id': current['remote_id'], 'url': f"https://www.youtube.com/watch?v={current['remote_id']}",

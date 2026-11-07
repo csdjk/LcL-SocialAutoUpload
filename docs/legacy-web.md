@@ -50,20 +50,9 @@ AI 日报新入口 `/` 的“今日待发布”页及 `/daily/*` 接口是增量
 - `docs/CLI.md`
 - `skills/douyin-upload/SKILL.md`
 
-## Windows 本地启动旧 Web 界面
+## Windows 启动入口
 
-首次启动前，在仓库根目录为独立 Python 环境安装旧 Web 后端依赖，并安装前端依赖：
-
-```powershell
-uv pip install --python .\.venv\Scripts\python.exe "Flask[async]==3.1.1" "flask-cors==6.0.0" "xhs==0.2.13" "pillow==11.2.1" "schedule==1.2.2"
-Push-Location .\sau_frontend
-npm install --no-package-lock
-Pop-Location
-```
-
-然后双击仓库根目录的 `start-win.bat`。脚本固定使用 `.venv` 的 Python，检查前后端依赖，仅在缺失时创建数据库表和运行目录，并将后端与界面分别启动在本机的 `127.0.0.1:5409`、`127.0.0.1:5173`。界面地址为 http://127.0.0.1:5173/ 。关闭两个新终端窗口即可停止服务。
-
-启动成功只表示本地界面和基础接口可用；这个历史 Web 版的各平台登录、上传和发布流程没有随当前 CLI 保证同步，使用时应按平台实际页面与远端结果核对。
+网页版启动脚本已移除。请使用仓库根目录的 `启动桌面发布工具.cmd` 或 `启动桌面发布工具.ps1` 打开独立窗口，安装与启动方法见[桌面版与自动排程](桌面版与自动排程.md)。下文保留历史 Web 实现的诊断记录，不作为当前启动或登录操作说明。
 
 
 ## 视频号账号添加修复（2026-09-23）

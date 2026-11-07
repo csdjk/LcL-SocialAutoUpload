@@ -1,7 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { dailyAccountLabel, dailyAccessText, canPublishDailyPlatform } from '../src/utils/dailyPublishState.js'
+import { dailyAccountLabel, dailyAccessText, canPublishDailyPlatform, sortDailyPlatforms } from '../src/utils/dailyPublishState.js'
 import { dailyTaskStatusText, dailyTaskNotice, dailyTaskNoticeType } from '../src/utils/dailyPublishState.js'
+
+test('unpublished platforms precede confirmed publications without changing within-group order or the input', () => {
+  const platforms = ['youtube', 'douyin', 'bilibili', 'wechat_channels', 'kuaishou', 'toutiao', 'xiaohongshu']
+    .map(key => Object.freeze({ key }))
+  Object.freeze(platforms)
+  const status = {
+    youtube: { state: 'published' }, douyin: { state: 'processing', remote_id: 'submitted' },
+    bilibili: { state: 'failed' }, wechat_channels: { state: 'published' },
+    kuaishou: { state: 'uploading' }, toutiao: { state: 'unknown', remote_verified: true }
+  }
+  assert.deepEqual(sortDailyPlatforms(platforms, status).map(item => item.key),
+    ['douyin', 'bilibili', 'kuaishou', 'toutiao', 'xiaohongshu', 'youtube', 'wechat_channels'])
+  assert.deepEqual(platforms.map(item => item.key),
+    ['youtube', 'douyin', 'bilibili', 'wechat_channels', 'kuaishou', 'toutiao', 'xiaohongshu'])
+})
+
+test('refreshing a confirmed publication moves it behind pending platforms while preserving platform identity', () => {
+  const platforms = [{ key: 'bilibili' }, { key: 'kuaishou' }, { key: 'youtube' }]
+  const status = { bilibili: { state: 'ready' }, kuaishou: { state: 'queued' }, youtube: { state: 'published' } }
+  assert.deepEqual(sortDailyPlatforms(platforms, status), platforms)
+  status.bilibili.state = 'published'
+  const ordered = sortDailyPlatforms(platforms, status)
+  assert.deepEqual(ordered.map(item => item.key), ['kuaishou', 'bilibili', 'youtube'])
+  assert.equal(ordered[0], platforms[1])
+  assert.deepEqual(sortDailyPlatforms(platforms), platforms)
+})
 
 test('confirmed publication takes precedence over generic existing-work evidence', () => {
   const item = { state: 'published', remote_verified: true }

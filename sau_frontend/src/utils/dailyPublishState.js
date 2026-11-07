@@ -1,4 +1,10 @@
 // A ready status permits a manual attempt; it is not proof of remote publication.
+// 仅把确认已发布的平台移到末尾，同组保持原顺序，不修改原平台列表。
+export function sortDailyPlatforms(platforms, status = {}) {
+  return [...platforms].sort((left, right) =>
+    Number(status[left.key]?.state === 'published') - Number(status[right.key]?.state === 'published'))
+}
+
 export function dailyAccountLabel(platform, item) {
   const account = item?.account || {}
   const name = account.display_name || account.alias || account.account_id || '未配置'

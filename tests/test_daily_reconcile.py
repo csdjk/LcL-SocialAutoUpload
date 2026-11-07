@@ -50,6 +50,26 @@ def test_explicit_no_work_confirmation_saves_without_id_or_link(record):
         assert daily._retry_allowed(persisted)
     upload.assert_not_called(); submit.assert_not_called()
 
+
+@pytest.mark.parametrize('remote_id,url', [('', ''), ('different-work', 'https://example.test/old'), ('old-work', '')])
+def test_existing_work_identity_and_link_cannot_be_erased(record, remote_id, url):
+    with daily._connection() as conn:
+        conn.execute("UPDATE attempts SET remote_id='old-work',url='https://example.test/old' WHERE id=?", (JOB,))
+    before = daily.task(JOB)
+    value = body(remote_absent=False, remote_id=remote_id, url=url, note='核对旧作品状态')
+    value['state'] = 'unknown'
+    assert send(record, value).status_code == 400
+    assert daily.task(JOB) == before
+
+
+def test_existing_identity_can_be_reconciled_without_reset(record):
+    with daily._connection() as conn:
+        conn.execute("UPDATE attempts SET remote_id='old-work',url='https://example.test/old' WHERE id=?", (JOB,))
+    value = body(remote_absent=False, remote_id='old-work', url='https://example.test/old', note='已核对官方后台公开状态')
+    value['state'] = 'published'
+    assert send(record, value).status_code == 200
+    assert daily.task(JOB)['remote_id'] == 'old-work'
+
 @pytest.mark.parametrize('change',[{'remote_absent':False},{'remote_absent':'true'},{'remote_id':'real-id'},{'url':'https://example.test/video'}])
 def test_failure_requires_explicit_confirmation_and_no_contradictory_work(record,change):
     response=send(record,body(**change))

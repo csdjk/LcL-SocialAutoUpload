@@ -117,3 +117,23 @@ test('browser total timeout requests browser login instead of manual QR', () => 
   Array.from(timers.values()).find(t => t.delay === 370000).fn()
   assert.match(events.at(-1)[1], /重新打开浏览器/)
 })
+
+test('Ego confirmation survives waiting and retries without reconnecting', () => {
+  const { source, timers, events } = setup({ mode: 'ego' })
+  source.named('login-status', { stage: 'browser_open', message: 'Ego 已打开' })
+  source.named('login-status', { stage: 'waiting_confirmation', confirmation_id: 'one', message: '请保存' })
+  source.named('login-status', { stage: 'verifying', message: '核验中' })
+  source.named('login-status', { stage: 'waiting_confirmation', confirmation_id: 'one', message: '请先登录' })
+  assert.equal(source.closed, false)
+  assert.equal(timers.size, 1)
+  assert.equal(events.at(-1)[1].confirmation_id, 'one')
+  source.message('200')
+  assert.equal(source.closed, true)
+})
+
+test('Ego startup failure names the selected browser', () => {
+  const { timers, events } = setup({ mode: 'ego' })
+  Array.from(timers.values()).find(t => t.delay === 60000).fn()
+  assert.match(events[0][1], /Ego/)
+  assert.doesNotMatch(events[0][1], /Edge/)
+})

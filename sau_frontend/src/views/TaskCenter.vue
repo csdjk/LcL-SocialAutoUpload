@@ -2,6 +2,18 @@
   <main class="task-page">
     <header class="page-heading"><div><p class="eyebrow">发布记录</p><h1>任务中心</h1><p>查看投稿进度，优先处理需要关注的任务。</p></div><el-button :loading="loading" @click="refresh()">刷新任务</el-button></header>
     <el-alert v-if="error" :title="error" type="error" show-icon :closable="false" />
+    <section v-if="visibleUpdates.length" class="soft-panel update-history" data-testid="update-history">
+      <h2>原作品更新</h2><p class="detail">视频修改与首次投稿分开记录，原作品ID和发布历史保留。</p>
+      <details v-for="task in visibleUpdates" :key="task.id" class="update-record" :open="['queued', 'updating', 'processing', 'unknown'].includes(task.state)">
+        <summary><strong>{{ label(task.platform) }} · {{ task.revision }}</strong>
+          <el-tag :type="task.state === 'applied' ? 'success' : ['failed', 'unknown'].includes(task.state) ? 'warning' : 'info'">{{ task.state_label }}</el-tag></summary>
+        <p>{{ task.mode === 'video' ? '替换视频并更新文案封面' : '仅更新文案封面' }} · {{ taskTime(task.created_at) }}</p>
+        <p class="detail">{{ task.error || task.evidence?.message }}</p>
+        <p class="update-ident">原作品：{{ task.remote_id }}</p><p class="update-ident">更新任务：{{ task.id }}</p>
+        <div class="actions"><a v-if="task.evidence?.url" :href="task.evidence.url" target="_blank" rel="noopener noreferrer">打开新版作品 ↗</a>
+          <el-button v-if="['processing', 'unknown'].includes(task.state)" :loading="busy[task.id]" @click="syncUpdate(task)">核对更新结果</el-button></div>
+      </details>
+    </section>
     <div class="task-toolbar">
       <div class="state-filters" role="group" aria-label="任务状态筛选"><button v-for="option in stateOptions" :key="option.key" type="button" :aria-pressed="stateFilter === option.key" :class="{ active: stateFilter === option.key }" @click="stateFilter = option.key">{{ option.name }}<span>{{ platformTasks.filter(task => option.key === 'all' || taskBucket(task.state) === option.key).length }}</span></button></div>
       <div class="filter-row"><label>平台<el-select v-model="filter" aria-label="筛选投稿平台"><el-option label="全部平台" value="all" /><el-option v-for="p in platforms" :key="p.key" :label="p.name" :value="p.key" /></el-select></label><span>{{ groups.length }} 项内容 · {{ visible.length }} 条任务</span></div>
@@ -46,6 +58,8 @@ const label = key => platformName(key)
 const stateText = taskStateText
 const tagType = taskTagType
 const tasks = ref([])
+const updateTasks = ref([])
+const visibleUpdates = computed(() => filter.value === 'all' ? updateTasks.value : updateTasks.value.filter(task => task.platform === filter.value))
 const filter = ref('all')
 const stateFilter = ref('all')
 const stateOptions = [{ key: 'all', name: '全部' }, { key: 'attention', name: '待处理' }, { key: 'active', name: '处理中' }, { key: 'published', name: '已发布' }]
@@ -84,7 +98,10 @@ async function refresh(silent = false) {
   if (refreshing) return
   refreshing = true
   if (!silent) loading.value = true
-  try { tasks.value = (await http.get('/daily/tasks', { limit: 100 }, { silentError: true })).data; error.value = '' }
+  try {
+    const [posts, changes] = await Promise.all([http.get('/daily/tasks', { limit: 100 }, { silentError: true }), http.get('/daily/update-tasks', { limit: 50 }, { silentError: true })])
+    tasks.value = posts.data; updateTasks.value = changes.data; error.value = ''
+  }
   catch (exc) { error.value = exc.message || '任务读取失败' }
   finally { refreshing = false; if (!silent) loading.value = false }
 }
@@ -95,6 +112,14 @@ async function sync(task) {
     ElMessage.info(result.data.sync.message || '已完成一次远端回读；请查看任务状态')
     await refresh()
   } catch (exc) { error.value = exc.message || '远端回读失败；原任务保留，未重投' }
+  finally { busy[task.id] = false }
+}
+async function syncUpdate(task) {
+  busy[task.id] = true
+  try {
+    await http.post('/daily/update-sync', { task_id: task.id }, { headers: { 'X-SAU-Local': '1' }, silentError: true, timeout: 60000 })
+    await refresh()
+  } catch (exc) { error.value = exc.message || '原稿回读失败，更新回执已保留' }
   finally { busy[task.id] = false }
 }
 function openReconcile(task) {
@@ -124,6 +149,12 @@ onUnmounted(() => { window.clearInterval(pollTimer); window.clearInterval(clockT
 </script>
 
 <style scoped>
+.update-history { margin: 20px 0; }
+.update-history h2 { margin: 0 0 8px; font-size: 20px; }
+.update-record { border-top: 1px solid var(--ui-border); padding: 12px 0; font-size: 13px; }
+.update-record summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.update-record p { line-height: 1.7; }
+.update-ident { color: var(--ui-muted); overflow-wrap: anywhere; }
 .task-page { max-width: 1440px; margin: auto; padding: 8px 4px 42px; }
 .page-heading, .task-head, .actions, .filter-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .page-heading { margin-bottom: 24px; }

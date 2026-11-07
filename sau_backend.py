@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 from myUtils.browser_login import get_browser_cookie
+from myUtils.ego_login import get_ego_cookie, confirm_login as confirm_ego_login
 from myUtils.login_session import LoginStatusQueue, run_login, sse_stream
 from flask_cors import CORS
 from myUtils.auth import check_cookie
@@ -384,10 +385,10 @@ def login():
     mode = request.args.get('mode', 'qr')
     if type not in {'1', '2', '3', '4', '5', '6', '7'}:
         return jsonify({'code': 400, 'msg': '平台无效'}), 400
-    if mode not in {'qr', 'browser'} or (type in {'6', '7'} and mode != 'browser'):
+    if mode not in {'qr', 'browser', 'ego'} or (type in {'6', '7'} and mode not in {'browser', 'ego'}):
         return jsonify({'code': 400, 'msg': '该平台不支持此登录方式'}), 400
 
-    if mode == 'browser':
+    if mode in {'browser', 'ego'}:
         # Only this local UI may launch native browser windows. Do not accept
         # arbitrary login URLs, profiles or cross-site window-spawning requests.
         if request.remote_addr not in ('127.0.0.1', '::1'):
@@ -407,7 +408,7 @@ def login():
         return jsonify({'code': 400, 'msg': '账号名称不能超过80字'}), 400
     account_id = request.args.get('account_id')
     if account_id is not None:
-        if (mode != 'browser' and type != '5') or not account_id.isdigit() or int(account_id) < 1:
+        if (mode not in {'browser', 'ego'} and type != '5') or not account_id.isdigit() or int(account_id) < 1:
             return jsonify({'code': 400, 'msg': '重新登录账号编号无效'}), 400
         account_id = int(account_id)
     status_queue = LoginStatusQueue()
@@ -422,6 +423,21 @@ def login():
     response.headers['Connection'] = 'keep-alive'
     response.call_on_close(status_queue.cancelled.set)
     return response
+
+@app.post('/daily/login/ego/confirm')
+def confirm_ego_login_route():
+    # /daily/* uses the loopback + same-origin guard below. The opaque ID is
+    # emitted only to the active SSE dialog, never accepted from query strings.
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or not isinstance(data.get('confirmation_id'), str):
+        return jsonify({'code': 400, 'msg': '登录确认参数无效'}), 400
+    try:
+        confirm_ego_login(data['confirmation_id'])
+    except ValueError:
+        return jsonify({'code': 400, 'msg': '登录确认参数无效'}), 400
+    except RuntimeError as exc:
+        return jsonify({'code': 409, 'msg': str(exc)}), 409
+    return jsonify({'code': 200, 'msg': '正在核验 Ego 登录'})
 
 def _post_bilibili_response(data):
     try:
@@ -739,6 +755,9 @@ def run_async_function(type,id,status_queue,mode='qr'):
     if type == '6':
         async def login_function(name, queue):
             await get_youtube_oauth(name, queue, account_id=getattr(queue, 'account_id', None))
+    elif mode == 'ego':
+        async def login_function(name, queue):
+            await get_ego_cookie(int(type), name, queue, account_id=getattr(queue, 'account_id', None))
     elif mode == 'browser':
         async def login_function(name, queue):
             await get_browser_cookie(int(type), name, queue, account_id=getattr(queue, 'account_id', None))
@@ -791,6 +810,105 @@ def daily_tasks():
         from publishing.service import list_tasks
         limit = int(request.args.get('limit', '30'))
         return jsonify({"code": 200, "data": list_tasks(limit)})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/update-preview', methods=['GET'])
+def daily_update_preview():
+    try:
+        from publishing.updates import preview
+        result = preview(request.args.get('platform'), request.args.get('mode', 'video'),
+                         edition_id=request.args.get('edition_id'))
+        result.pop('payload')
+        return jsonify({'code': 200, 'data': result})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/update', methods=['POST'])
+@app.route('/daily/update-sync', methods=['POST'])
+def daily_update_submit():
+    if request.headers.get('X-SAU-Local') != '1':
+        return jsonify({'code': 403, 'msg': '请从本机发布工具更新原作品', 'data': None}), 403
+    try:
+        from publishing import updates
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('更新请求格式无效')
+        result = (updates.sync(body.get('task_id')) if request.path.endswith('-sync') else
+                   updates.submit(body.get('preview_id'), body.get('platform'), body.get('mode', 'video'),
+                                  edition_id=body.get('edition_id')))
+        return jsonify({'code': 200, 'data': result})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/update-task/<ident>', methods=['GET'])
+def daily_update_task(ident):
+    try:
+        from publishing.updates import task
+        return jsonify({'code': 200, 'data': task(ident)})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/update-tasks', methods=['GET'])
+def daily_update_tasks():
+    try:
+        from publishing.updates import list_tasks
+        return jsonify({'code': 200, 'data': list_tasks(int(request.args.get('limit', '30')))})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/replacement-preview', methods=['GET'])
+def daily_replacement_preview():
+    try:
+        from publishing.replacements import preview
+        result = preview(request.args.get('edition_id'), request.args.get('platform'), target_remote_id=request.args.get('target_remote_id'))
+        result.pop('payload')
+        return jsonify({'code': 200, 'data': result})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/replacement', methods=['POST'])
+@app.route('/daily/replacement-sync', methods=['POST'])
+@app.route('/daily/replacement-resume', methods=['POST'])
+def daily_replacement_submit():
+    if request.headers.get('X-SAU-Local') != '1':
+        return jsonify({'code': 403, 'msg': '请从本机发布工具操作替换任务', 'data': None}), 403
+    try:
+        from publishing import replacements
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('替换请求格式无效')
+        if request.path.endswith('-sync'):
+            result = replacements.sync(body.get('task_id'))
+        elif request.path.endswith('-resume'):
+            result = replacements.resume(body.get('task_id'), retry_existing_delete=body.get('retry_existing_delete', False))
+        else:
+            result = replacements.submit(body.get('preview_id'), body.get('edition_id'), body.get('platform'), target_remote_id=body.get('target_remote_id'))
+        return jsonify({'code': 200, 'data': result})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/replacement-task/<ident>', methods=['GET'])
+def daily_replacement_task(ident):
+    try:
+        from publishing.replacements import task
+        return jsonify({'code': 200, 'data': task(ident)})
+    except (ValueError, OSError, sqlite3.Error) as error:
+        return _daily_error(error)
+
+
+@app.route('/daily/replacement-tasks', methods=['GET'])
+def daily_replacement_tasks():
+    try:
+        from publishing.replacements import list_tasks
+        return jsonify({'code': 200, 'data': list_tasks(int(request.args.get('limit', '30')))})
     except (ValueError, OSError, sqlite3.Error) as error:
         return _daily_error(error)
 

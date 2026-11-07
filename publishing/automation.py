@@ -7,6 +7,7 @@ import re
 import threading
 
 import daily_publish as daily
+from publishing.platforms import DAILY_PLATFORMS
 
 _settings_lock = threading.Lock()
 _CLOCK = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
@@ -104,14 +105,14 @@ def tick(now: datetime | None = None) -> list[str]:
         bundle = service.today(cached=True)
     except (ValueError, OSError, json.JSONDecodeError) as exc:
         for name, item in config["platforms"].items():
-            if item["enabled"]:
+            if name in DAILY_PLATFORMS and item["enabled"]:
                 _record(current.date().isoformat(), name, "waiting", str(exc))
         return []
     if not bundle["package"]:
         return []
     jobs = []
     for name, item in config["platforms"].items():
-        if not item["enabled"]:
+        if name not in DAILY_PLATFORMS or not item["enabled"]:
             continue
         try:
             if name not in bundle["publishable_platforms"]:

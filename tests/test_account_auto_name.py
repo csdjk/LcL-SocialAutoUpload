@@ -113,6 +113,30 @@ def test_real_edge_reads_names_not_titles_and_rejects_ambiguous_or_wrong_host():
     asyncio.run(scenario())
 
 
+def test_douyin_account_card_takes_priority_over_other_visible_names():
+    async def scenario():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(channel='msedge', headless=True)
+            try:
+                page = await browser.new_page()
+                await page.route('**/*', lambda route: route.fulfill(
+                    body='<div class="header-abc"><div class="left-def"><div class="name-ghi">本人昵称</div></div>'
+                         '<div class="unique_id-jkl">抖音号：123</div></div><div class="user-name">评论者昵称</div>',
+                    content_type='text/html; charset=utf-8'))
+                await page.goto('https://creator.douyin.com/creator-micro/home')
+                assert await read_account_name(3, page, timeout=0) == '本人昵称'
+                await page.evaluate('''() => {
+                    const card = document.querySelector('[class^="header-"]').cloneNode(true);
+                    card.querySelector('[class^="name-"]').textContent = '另一个账号';
+                    document.body.append(card);
+                }''')
+                with pytest.raises(AccountNameError, match='多个'):
+                    await read_account_name(3, page, timeout=0)
+            finally:
+                await browser.close()
+    asyncio.run(scenario())
+
+
 def test_kuaishou_current_header_name_is_read_without_using_video_names():
     async def scenario():
         async with async_playwright() as p:

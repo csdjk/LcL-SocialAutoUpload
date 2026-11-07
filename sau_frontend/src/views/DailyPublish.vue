@@ -38,7 +38,7 @@
       </section>
 
       <div class="platform-grid" aria-label="选择投稿平台">
-        <article v-for="platform in platforms" :key="platform.key" class="platform-card" :data-platform="platform.key">
+        <article v-for="platform in orderedPlatforms" :key="platform.key" class="platform-card" :data-platform="platform.key">
           <div class="platform-head">
             <div>
               <p class="eyebrow">{{ bundle.status[platform.key]?.transport?.label || platform.mode }}</p>
@@ -79,10 +79,25 @@
             </div>
             <div class="cover-copy"><p class="material-title">{{ drafts[platform.key]?.title }}</p><span>封面可点击放大</span></div>
           </div>
+          <section v-if="bundle.updates?.[platform.key]" class="work-update" :data-testid="`work-update-${platform.key}`">
+            <p class="version-line">原作品视频 {{ bundle.updates[platform.key].effective_revision }}
+              <span>→ 当前材料 {{ bundle.updates[platform.key].target_revision }}</span></p>
+            <template v-if="bundle.updates[platform.key].latest_task">
+              <p class="update-result"><strong>{{ bundle.updates[platform.key].latest_task.state_label }}</strong>
+                · {{ bundle.updates[platform.key].latest_task.revision }}</p>
+              <p class="subtle">{{ bundle.updates[platform.key].latest_task.error || bundle.updates[platform.key].latest_task.evidence?.message }}</p>
+              <el-button v-if="['processing', 'unknown'].includes(bundle.updates[platform.key].latest_task.state)"
+                link type="primary" :loading="actionBusy[platform.key]" @click="syncUpdate(platform.key)">核对原稿更新结果</el-button>
+            </template>
+            <el-button v-if="bundle.updates[platform.key].modes.length" type="primary" plain
+              :disabled="!bundle.updates[platform.key].can_update || submitting" @click="openUpdate(platform.key)"
+              :data-testid="`update-work-${platform.key}`">更新原作品</el-button>
+            <p v-else class="subtle">{{ bundle.updates[platform.key].reason }}</p>
+          </section>
           <details class="advanced-publish"><summary>编辑文案与封面设置</summary>
           <p class="subtle transport-reason">{{ bundle.status[platform.key]?.transport?.reason }}</p>
           <el-form label-position="top" v-if="drafts[platform.key]">
-            <el-form-item label="标题"><el-input v-model="drafts[platform.key].title" :maxlength="platform.key === 'xiaohongshu' ? 20 : platform.key === 'toutiao' ? 30 : platform.key === 'youtube' ? 100 : 120" show-word-limit /></el-form-item>
+            <el-form-item label="标题"><el-input v-model="drafts[platform.key].title" :maxlength="platform.key === 'toutiao' ? 30 : platform.key === 'youtube' ? 100 : 120" show-word-limit /></el-form-item>
             <el-form-item v-if="platform.key === 'wechat_channels'" label="封面方式">
               <el-radio-group v-model="drafts[platform.key].cover_mode" aria-label="视频号封面方式">
                 <el-radio value="custom">资源包双封面（4:3＋3:4）</el-radio>
@@ -99,7 +114,7 @@
               <p v-if="categoriesError" class="subtle">{{ categoriesError }} <el-button link @click="loadCategories">重新读取分区</el-button></p>
             </el-form-item>
             <YouTubeOptions v-if="platform.key === 'youtube'" v-model="drafts[platform.key]" />
-            <el-form-item v-if="platform.key !== 'bilibili'" :label="['kuaishou', 'xiaohongshu'].includes(platform.key) ? 'AI 内容声明（追加到简介）' : 'AI 内容声明'"><el-input v-model="drafts[platform.key].ai_declaration" /></el-form-item>
+            <el-form-item v-if="platform.key !== 'bilibili'" :label="platform.key === 'kuaishou' ? 'AI 内容声明（追加到简介）' : 'AI 内容声明'"><el-input v-model="drafts[platform.key].ai_declaration" /></el-form-item>
           </el-form>
           <el-button @click="save(platform.key)" :disabled="!accountId(platform.key) || actionBusy[platform.key]">保存此平台草稿</el-button>
           </details>
@@ -108,10 +123,9 @@
             :state="bundle.status[platform.key].state"
             :evidence="{ stage: bundle.status[platform.key].progress_stage, message: bundle.status[platform.key].progress_message, media_percent: bundle.status[platform.key].media_percent }"
             :created-at="bundle.status[platform.key].task_created_at" :now="now" />
-          <div v-if="['wechat_channels', 'kuaishou', 'xiaohongshu'].includes(platform.key) || ['unknown', 'processing'].includes(bundle.status[platform.key]?.state)" class="platform-actions">
-            <el-button v-if="['bilibili', 'douyin', 'wechat_channels', 'youtube', 'toutiao', 'kuaishou', 'xiaohongshu'].includes(platform.key) && ['unknown', 'processing'].includes(bundle.status[platform.key]?.state)"
+          <div v-if="['wechat_channels', 'kuaishou'].includes(platform.key) || ['unknown', 'processing'].includes(bundle.status[platform.key]?.state)" class="platform-actions">
+            <el-button v-if="['bilibili', 'douyin', 'wechat_channels', 'youtube', 'toutiao', 'kuaishou'].includes(platform.key) && ['unknown', 'processing'].includes(bundle.status[platform.key]?.state)"
               type="primary" :loading="actionBusy[platform.key]" @click="syncResult(platform.key)" data-testid="sync-wechat_channels">同步后台结果</el-button>
-            <a v-if="platform.key === 'xiaohongshu'" href="https://creator.xiaohongshu.com/new/note-manager" target="_blank" rel="noopener noreferrer" class="backend-link">查看小红书后台</a>
             <a v-if="platform.key === 'kuaishou'" href="https://cp.kuaishou.com/article/manage/video" target="_blank" rel="noopener noreferrer" class="backend-link">查看快手后台</a>
             <a v-if="platform.key === 'wechat_channels'" href="https://channels.weixin.qq.com/platform/post/list" target="_blank" rel="noopener noreferrer" class="backend-link">查看视频号后台</a>
           </div>
@@ -135,6 +149,29 @@
         <p>每 3 秒更新今日内容与任务进度。点击发布会保存选中平台的文案并入队。</p>
       </footer>
     </template>
+
+    <el-dialog v-model="updateVisible" title="更新原作品" width="min(92vw, 660px)" align-center
+      :close-on-click-modal="false" :close-on-press-escape="!updateSubmitting" :show-close="!updateSubmitting">
+      <div v-loading="updateLoading" class="update-preview">
+        <p class="subtle">原作品ID与发布记录保留，修改可能重新审核。</p>
+        <el-radio-group v-model="updateMode" :disabled="updateSubmitting || updateLoading" @change="loadUpdatePreview">
+          <el-radio value="video">替换视频并更新文案封面</el-radio>
+          <el-radio v-if="bundle?.updates?.[updatePlatform]?.modes.includes('metadata')" value="metadata">只更新文案封面</el-radio>
+        </el-radio-group>
+        <template v-if="updatePreview">
+          <p class="update-work-id">原作品：{{ updatePreview.remote_id }}</p>
+          <div class="update-comparison">
+            <div><span>当前原稿 · {{ updatePreview.old_revision }}</span><strong>{{ updatePreview.old_title }}</strong><p>{{ updatePreview.old_duration }} 秒</p></div>
+            <div><span>本次更新 · {{ updatePreview.revision }}</span><strong>{{ updatePreview.new_title }}</strong><p>{{ updateMode === 'video' ? updatePreview.new_duration : updatePreview.old_duration }} 秒</p></div>
+          </div>
+          <p>更新内容：{{ updatePreview.changes.join('、') }}</p>
+          <el-alert :title="updatePreview.warning" type="warning" :closable="false" show-icon />
+        </template>
+        <el-alert v-if="updateError" :title="updateError" type="error" :closable="false" show-icon />
+      </div>
+      <template #footer><el-button :disabled="updateSubmitting" @click="updateVisible = false">取消</el-button>
+        <el-button type="primary" :loading="updateSubmitting" :disabled="updateLoading || !updatePreview" @click="submitUpdate" data-testid="confirm-work-update">提交原稿更新</el-button></template>
+    </el-dialog>
 
     <el-dialog v-model="coverVisible" :title="coverPreview.title" width="min(94vw, 920px)" align-center
       class="cover-preview-dialog" append-to-body @closed="coverPreview = {}">
@@ -198,7 +235,7 @@ import { http } from '@/utils/request'
 import { platformCoverPreviews } from '@/utils/platformCoverPreviews'
 import { channelCoverPreviews } from '@/utils/channelCoverPreviews'
 import { RECONCILE_STATES, buildStatusConfirmation } from '@/utils/dailyReconcile'
-import { dailyAccountLabel, dailyAccessText, canPublishDailyPlatform, isUnuploadedFailure, dailyTaskStatusText, dailyTaskNotice, isRecoveredLoginFailure, needsDailyRelogin, dailyTaskNoticeType } from '@/utils/dailyPublishState'
+import { dailyAccountLabel, dailyAccessText, canPublishDailyPlatform, isUnuploadedFailure, dailyTaskStatusText, dailyTaskNotice, isRecoveredLoginFailure, needsDailyRelogin, dailyTaskNoticeType, sortDailyPlatforms } from '@/utils/dailyPublishState'
 import YouTubeOptions from '@/components/YouTubeOptions.vue'
 import PublicationProgress from '@/components/PublicationProgress.vue'
 
@@ -208,10 +245,60 @@ const platforms = [
   { key: 'wechat_channels', name: '视频号', mode: '本机浏览器', cover: 'portrait' },
   { key: 'youtube', name: 'YouTube', mode: '官方 API', cover: 'landscape' },
   { key: 'toutiao', name: '今日头条', mode: '头条号后台', cover: 'landscape' },
-  { key: 'kuaishou', name: '快手', mode: '本机浏览器', cover: 'portrait' },
-  { key: 'xiaohongshu', name: '小红书', mode: '本机浏览器', cover: 'portrait' }
+  { key: 'kuaishou', name: '快手', mode: '本机浏览器', cover: 'portrait' }
 ]
 const bundle = ref(null)
+const orderedPlatforms = computed(() => sortDailyPlatforms(platforms, bundle.value?.status))
+const updateVisible = ref(false)
+const updateMode = ref('video')
+const updatePlatform = ref('')
+const updateLoading = ref(false)
+const updateSubmitting = ref(false)
+const updatePreview = ref(null)
+const updateError = ref('')
+let updateGeneration = 0
+async function openUpdate(platform) {
+  try { await save(platform) } catch { return }
+  updatePlatform.value = platform
+  updateMode.value = 'video'
+  updateVisible.value = true
+  await loadUpdatePreview()
+}
+async function loadUpdatePreview() {
+  const generation = ++updateGeneration
+  updateLoading.value = true
+  updatePreview.value = null
+  updateError.value = ''
+  try {
+    const result = await http.get('/daily/update-preview', { platform: updatePlatform.value, mode: updateMode.value }, { timeout: 60000 })
+    if (generation !== updateGeneration) return
+    if (result.code !== 200) throw new Error(result.msg || '读取更新预览失败')
+    updatePreview.value = result.data
+  } catch (error) { if (generation === updateGeneration) updateError.value = error.message }
+  finally { if (generation === updateGeneration) updateLoading.value = false }
+}
+async function submitUpdate() {
+  if (!updatePreview.value || updateSubmitting.value) return
+  updateSubmitting.value = true
+  updateError.value = ''
+  try {
+    const result = await http.post('/daily/update', { preview_id: updatePreview.value.preview_id, platform: updatePlatform.value, mode: updateMode.value }, { headers: { 'X-SAU-Local': '1' }, timeout: 60000 })
+    if (result.code !== 200) throw new Error(result.msg || '原稿更新未入队')
+    updateVisible.value = false
+    ElMessage.success('原稿更新已入队，请查看更新结果')
+    await refresh(true)
+  } catch (error) { updateError.value = error.message }
+  finally { updateSubmitting.value = false }
+}
+async function syncUpdate(platform) {
+  actionBusy[platform] = true
+  try {
+    const result = await http.post('/daily/update-sync', { task_id: bundle.value.updates[platform].latest_task.id }, { headers: { 'X-SAU-Local': '1' } })
+    if (result.code !== 200) throw new Error(result.msg || '核对更新失败')
+    await refresh(true)
+  } catch (error) { actionErrors[platform] = error.message }
+  finally { actionBusy[platform] = false }
+}
 const coverVisible = ref(false)
 const coverPreview = ref({})
 const coversFor = platform => platformCoverPreviews(bundle.value?.package, platform.key, drafts[platform.key])
@@ -471,6 +558,21 @@ onUnmounted(() => window.clearInterval(timer))
 .today-summary strong { color: var(--ui-text); }
 .today-summary a { color: var(--el-color-primary); }
 .transport-reason { line-height: 1.6; }
+.work-update { margin: 12px 0; padding: 12px; border-radius: 10px; background: var(--ui-soft); border: 1px solid var(--ui-border); }
+.version-line { margin: 0 0 10px; font-size: 13px; line-height: 1.7; }
+.version-line span { color: var(--ui-muted); }
+.work-update .subtle { margin: 8px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
+.update-result { margin: 8px 0; font-size: 13px; }
+.update-preview { min-height: 150px; }
+.update-preview :deep(.el-radio-group) { display: flex; flex-wrap: wrap; gap: 0 12px; }
+.update-preview :deep(.el-radio) { margin-right: 0; height: auto; min-height: 36px; white-space: normal; }
+.update-work-id { overflow-wrap: anywhere; font-size: 13px; }
+.update-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 18px 0; }
+.update-comparison > div { padding: 14px; background: var(--ui-soft); border: 1px solid var(--ui-border); border-radius: 10px; min-width: 0; }
+.update-comparison span { display: block; color: var(--ui-muted); font-size: 12px; margin-bottom: 8px; }
+.update-comparison strong { display: block; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.update-comparison p { margin: 8px 0 0; color: var(--ui-muted); }
+@media(max-width: 600px) { .update-comparison { grid-template-columns: 1fr; } }
 .binding-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .binding-dialog-actions .el-button { margin: 0; }
 .page-header h1 { margin: 3px 0 5px; font-size: clamp(26px, 2.4vw, 32px); }

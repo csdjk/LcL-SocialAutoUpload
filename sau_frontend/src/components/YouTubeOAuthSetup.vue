@@ -1,7 +1,7 @@
 <template>
   <section class="youtube-setup" aria-label="YouTube 官方授权配置">
     <strong>{{ configured ? '客户端已配置，可以授权频道' : '首次使用：配置 Google 官方授权' }}</strong>
-    <p>授权会打开系统默认浏览器。成功后自动读取频道名、保存授权并续期，无需扩展。</p>
+    <p>授权会打开 Ego。成功后自动读取频道名、保存授权并续期。</p>
     <details :open="!configured">
       <summary>首次配置步骤</summary>
       <ol>

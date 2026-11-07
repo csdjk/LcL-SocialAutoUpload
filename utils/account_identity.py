@@ -40,7 +40,9 @@ async def read_account_name(platform, page, *, timeout=5):
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         names = set()
-        for element in await page.locator(selector).all():
+        card = '[class^="header-"]:has(> [class^="unique_id-"]) > [class^="left-"] > [class^="name-"]'
+        primary = [element for element in await page.locator(card).all() if await element.is_visible()] if platform == 3 else []
+        for element in primary or await page.locator(selector).all():
             if await element.is_visible():
                 text = (await element.inner_text()).strip()
                 if text:

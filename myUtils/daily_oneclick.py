@@ -36,7 +36,12 @@ def sync_result(job_id):
     if current['state'] in ('queued','uploading'):raise ValueError('投稿仍在排队或执行，请查看进度，不要重复提交')
     if current['state'] == 'published': return {'task':current,'sync':{'status':'found','message':'任务已记录为发布成功'}}
     cookie = task_cookie(current); material = current['payload']
-    result = asyncio.run(readback_file(cookie,material.get('title',''),material.get('description',''),current['edition_id']))
+    if (current.get('remote_id') or material.get('_history_authorization')
+            or current['edition_id'] < datetime.now(daily.BEIJING).date().isoformat()):
+        result = asyncio.run(readback_file(cookie, material.get('title',''), material.get('description',''),
+                                          current['edition_id'], all_dates=True, remote_id=current.get('remote_id')))
+    else:
+        result = asyncio.run(readback_file(cookie,material.get('title',''),material.get('description',''),current['edition_id']))
     if result.get('status') != 'found':
         # Absence is not enough to unlock a possibly submitted historical attempt.
         return {'task':current,'sync':result}

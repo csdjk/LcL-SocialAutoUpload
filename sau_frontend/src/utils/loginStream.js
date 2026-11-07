@@ -26,8 +26,9 @@ export function createLoginStream(url, callbacks, options = {}) {
 
   try {
     source = new Source(url)
-    qrTimer = schedule(() => fail(options.mode === 'browser' ? '浏览器打开超时，请检查 Edge 后重试' : '二维码获取超时，请检查网络后重试'), options.qrTimeoutMs ?? 60000)
-    loginTimer = schedule(() => fail(options.mode === 'browser' ? '登录等待超时，请重新打开浏览器并完成平台验证' : '登录等待超时，请重新扫码并在手机上确认'), options.loginTimeoutMs ?? 370000)
+    const browserMode = ['browser', 'ego'].includes(options.mode)
+    qrTimer = schedule(() => fail(browserMode ? `浏览器打开超时，请检查 ${options.mode === 'ego' ? 'Ego' : 'Edge'} 后重试` : '二维码获取超时，请检查网络后重试'), options.qrTimeoutMs ?? 60000)
+    loginTimer = schedule(() => fail(browserMode ? '登录等待超时，请重新打开浏览器并完成平台验证' : '登录等待超时，请重新扫码并在手机上确认'), options.loginTimeoutMs ?? 370000)
     source.onmessage = (event) => {
       if (!active) return
       const data = event.data

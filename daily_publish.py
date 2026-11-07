@@ -17,7 +17,7 @@ import hashlib
 from conf import BASE_DIR
 from uploader.tencent_uploader.flow import SubmissionNotStarted
 
-from publishing.platforms import CORE_PLATFORMS, PLATFORMS, PLATFORM_TYPES, PLATFORM_NAMES, material_for
+from publishing.platforms import CORE_PLATFORMS, PLATFORMS, DAILY_PLATFORMS, PLATFORM_TYPES, PLATFORM_NAMES, material_for
 from publishing.runtime_version import require_current
 BEIJING = timezone(timedelta(hours=8), "Asia/Shanghai")
 ACTIVE = {"queued", "uploading", "needs_action", "processing", "published", "unknown"}
@@ -573,13 +573,25 @@ def save_draft(path: Path, platform: str, account_id: str, payload: dict):
 
 
 def reserve(path: Path, platform: str, source: str, payload: dict | None = None, *, queued=False,
-             expected_transport=None, scheduled_for: str | None = None) -> str:
+             expected_transport=None, scheduled_for: str | None = None, history_authorization=None,
+             replacement_authorization=None, _validate_only=False) -> str | dict:
     require_current()
     if source not in {"manual", "automation", "mcp"} or platform not in PLATFORMS:
         raise ValueError("发布来源或平台无效")
     package = load_package(path)
     imported = package.get("kind") == "imported"
-    if not imported and package["date"] != datetime.now(BEIJING).date().isoformat():
+    if not imported and platform not in DAILY_PLATFORMS:
+        raise ValueError("小红书已移出每日投稿范围，不允许通过今日发布提交")
+    history = history_authorization is not None
+    replacement = replacement_authorization is not None
+    if replacement and (history or source != 'mcp' or not queued or scheduled_for is not None or imported):
+        raise ValueError('删除重投只能通过独立替换任务立即入队')
+    if history:
+        from publishing.history import validate_authorization
+        validate_authorization(package, platform, source, history_authorization)
+        if scheduled_for is not None:
+            raise ValueError("历史补投不能作为自动预约任务")
+    if not imported and not history and not replacement and package["date"] != datetime.now(BEIJING).date().isoformat():
         raise ValueError("只能提交北京时间当天的资源包")
     if not imported:
         import_legacy(output_root().parent / "publications.json")
@@ -607,9 +619,17 @@ def reserve(path: Path, platform: str, source: str, payload: dict | None = None,
     elif platform_access(platform, account, config) != "ready":
         raise ValueError(f"{platform} 的访问状态尚未就绪")
     aid = str(account["account_id"])
+    if history and history_authorization['account_id'] != aid:
+        raise ValueError("历史补投账号已变化，请重新核对")
     material = material_for(package, platform)
     if source in {"manual", "mcp", "automation"}:
         material.update(payload or get_draft(path, platform, aid) or {})
+    material.pop('_history_authorization', None)
+    material.pop('_replacement_authorization', None)
+    if replacement:
+        material['_replacement_authorization'] = replacement_authorization
+    if history:
+        material['_history_authorization'] = history_authorization
     from publishing.transports import resolve
     if platform in ("youtube", "toutiao"):
         from publishing.creator_browser import validate_material
@@ -655,17 +675,26 @@ def reserve(path: Path, platform: str, source: str, payload: dict | None = None,
             raise ValueError('抖音 API 发布文案超过 1000 字')
     material["_delivery"] = transport
     material["_package_sha256"] = package_digest(package)
+    if _validate_only:
+        # Replacement preflight uses exactly the normal material/account gates
+        # before deleting anything. No reservation or eligibility is consumed.
+        return material
     job_id = str(uuid.uuid4())
     now = datetime.now(BEIJING).isoformat()
     with _connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        from publishing import replacements
+        if replacement:
+            replacements.consume_authorization(conn, replacement_authorization, package, platform, aid, material, job_id)
+        else:
+            replacements.check_conflict(conn, package['edition_id'], platform, aid)
         legacy = None if imported else conn.execute("SELECT * FROM legacy WHERE edition_day=? AND platform=? AND account_id=?",
                                                     (package["date"], platform, aid)).fetchone()
-        if legacy and (legacy["state"] != "failed" or legacy["remote_id"] or
+        if not replacement and legacy and (legacy["state"] != "failed" or legacy["remote_id"] or
                        not json.loads(legacy["evidence"]).get("remote_absent")):
             raise ValueError(f"历史账本已有 {platform} {legacy['state']}，先核对远端")
         old = _latest(conn, package["edition_id"], platform, aid)
-        if old and not _retry_allowed(old):
+        if not replacement and old and not _retry_allowed(old):
             raise ValueError(f"该期 {platform} 已预约或提交：{old['state']}")
         if _other_account_history_blocks(conn, package["edition_id"], "" if imported else package["date"], platform, aid):
             raise ValueError(f"{platform} 已有其他账号的历史投稿或任务，先核对远端")
@@ -763,6 +792,10 @@ def reconcile(job_id: str, state: str, evidence: dict, *, expected_updated_at=No
     if not isinstance(remote_id, str) or not isinstance(url, str):
         raise ValueError("作品 ID 和链接必须为文本")
     remote_id, url = remote_id.strip(), url.strip()
+    if current['remote_id'] and remote_id != current['remote_id']:
+        raise ValueError('已有作品 ID 不能清空或替换；删除重投须保留原任务并使用独立替换流程')
+    if current['url'] and not url:
+        raise ValueError('已有作品链接不能清空，原作品历史必须保留')
     if len(remote_id) > 200 or len(url) > 2048:
         raise ValueError("作品 ID 或链接过长")
     if not manual_confirmation and state in {"processing", "published"} and not remote_id:
@@ -899,7 +932,9 @@ def _upload(job: dict, package: dict):
                                    thumbnail_landscape_path=str(landscape), thumbnail_portrait_path=str(portrait),
                                    short_title=material.get("short_title"), headless=False,
                                    require_content_label=True, require_thumbnail=True,
-                                   cover_mode=material.get("cover_mode", "custom"), edition_day=package["date"],
+                                   cover_mode=material.get("cover_mode", "custom"),
+                                   edition_day=(datetime.now(BEIJING).date().isoformat()
+                                                if material.get('_history_authorization') or material.get('_replacement_authorization') else package["date"]),
                                    progress_callback=(lambda value: _progress(job["id"], value)) if job.get("id") else None)
                 return await app.tencent_upload_video()
             return asyncio.run(upload_web_account())
@@ -959,7 +994,17 @@ def run(job_id: str):
         _progress(job_id, {"stage": "checking", "message": "正在校验资源包与账号"})
         try:
             package = load_package(Path(current["package_path"]))
-            if package.get("kind") != "imported" and package["date"] != datetime.now(BEIJING).date().isoformat():
+            history_authorization = current['payload'].get('_history_authorization')
+            replacement_authorization = current['payload'].get('_replacement_authorization')
+            if replacement_authorization:
+                from publishing.replacements import validate_child
+                validate_child(current, package)
+            if history_authorization:
+                from publishing.history import validate_authorization
+                validate_authorization(package, current['platform'], current['source'], history_authorization)
+                if history_authorization['account_id'] != current['account_id']:
+                    raise ValueError('历史补投账号身份不一致')
+            if not history_authorization and not replacement_authorization and package.get("kind") != "imported" and package["date"] != datetime.now(BEIJING).date().isoformat():
                 raise ValueError("资源包已过期，不自动补发昨日视频")
             expected_hash = current["payload"].get("_package_sha256")
             if expected_hash and package_digest(package) != expected_hash:
@@ -970,8 +1015,21 @@ def run(job_id: str):
         with account_lock(current["platform"], current["account_id"]) as acquired:
             if not acquired:
                 raise UploadNotStartedError("同一账号还有任务正在执行，请稍后重试", "account_busy")
+            if history_authorization:
+                from publishing.history import read_remote
+                check = read_remote(current['payload'], current['account_id'], package['date'])
+                if check['status'] == 'found':
+                    return _record_remote_found(current, {**check, 'existing': True})
+                if check['status'] != 'absent':
+                    raise UploadNotStartedError('历史查重未完成，尚未上传：' + check.get('message', check['status']),
+                                                'remote_check_unavailable', 'sync_result')
             outcome = _upload(current, package)
         if isinstance(outcome, dict) and outcome.get("status") == "found":
+            if replacement_authorization:
+                from publishing.replacements import task as replacement_task
+                replacement = replacement_task(replacement_authorization['replacement_id'])
+                if outcome.get('remote_id') == replacement['old_remote_id']:
+                    raise ValueError('替换新稿回读命中已删除旧作品，需核对原任务')
             return _record_remote_found(current, outcome)
     except SubmissionNotStarted as exc:
         if exc.code == "login_check_failed" and getattr(exc, "account_file", None):

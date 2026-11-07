@@ -94,7 +94,11 @@ def oauth_roundtrip(root, *, bad_state=False, deny=False, queue=None, account_id
                                   'expires_in': 3600, 'scope': ' '.join(yt.SCOPES)})
         return response(data=channel)
     try:
-        with patch.object(yt.webbrowser, 'open', side_effect=open_browser), patch.object(yt, 'request', side_effect=request):
+        async def ego_open(operation, arguments, base):
+            assert operation == 'start_oauth'
+            open_browser(arguments['url'])
+            return {'status': 'browser_open'}
+        with patch('myUtils.ego_login._ego_call', side_effect=ego_open), patch.object(yt, 'request', side_effect=request):
             yt.authorize(root, queue, account_id, timeout=2)
     finally:
         for thread in threads: thread.join(4)

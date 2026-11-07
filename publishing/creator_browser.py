@@ -145,7 +145,7 @@ async def youtube_fields(page, material, cover, flow):
     await click(page.locator(f'tp-yt-paper-radio-button[name="{material["visibility"].upper()}"]'), 'YouTube 可见性')
 
 
-async def toutiao_fields(page, material, cover, flow):
+async def toutiao_fields(page, material, cover, flow, *, editing=False):
     notice = page.get_by_text('我知道了', exact=True).filter(visible=True)
     if await notice.count() == 1:
         await notice.click()
@@ -156,7 +156,7 @@ async def toutiao_fields(page, material, cover, flow):
         description += '\n' + ' '.join('#'+tag.lstrip('#')+'#' for tag in missing_tags)
     await (await unique(page.locator('textarea[placeholder*="简介"], [contenteditable="true"][data-placeholder*="简介"]'), '头条视频简介')).fill(description)
     await flow.emit('cover')
-    button = page.get_by_text(re.compile(r'^(上传封面|设置封面|修改封面)$'))
+    button = page.get_by_text(re.compile(r'^(上传封面|设置封面|修改封面|替换)$'))
     if await button.filter(visible=True).count(): await click(button, '设置封面')
     local = page.get_by_text('本地上传', exact=True).filter(visible=True)
     if await local.count() == 1:
@@ -186,6 +186,9 @@ async def toutiao_fields(page, material, cover, flow):
     await flow.emit('cover', '头条自定义封面已保存并核对预览',
                     cover_screenshot=await capture(page, 'toutiao', 'cover-saved'))
     if material.get('ai_declaration'):
+        existing = page.locator('input[type="checkbox"][value="3"]')
+        if editing and await existing.count() == 1 and await existing.is_checked():
+            return
         await flow.emit('metadata', '填写头条 AI 内容声明')
         declaration = await unique(page.get_by_text(re.compile(r'^(AI生成|内容由AI生成|内容由 AI 生成|含AI生成内容|使用AI工具生成)$')), '头条 AI 内容声明')
         # The fixed publish bar can cover the auto-scrolled checkbox in a short viewport.

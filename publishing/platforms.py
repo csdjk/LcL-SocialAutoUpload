@@ -3,6 +3,7 @@ import copy
 
 CORE_PLATFORMS = ("bilibili", "douyin", "wechat_channels")
 PLATFORMS = (*CORE_PLATFORMS, "youtube", "toutiao", "kuaishou", "xiaohongshu")
+DAILY_PLATFORMS = (*CORE_PLATFORMS, "youtube", "toutiao", "kuaishou")
 PLATFORM_TYPES = {"bilibili": 5, "douyin": 3, "wechat_channels": 2, "youtube": 6, "toutiao": 7, "kuaishou": 4, "xiaohongshu": 1}
 PLATFORM_NAMES = {"bilibili": "B站", "douyin": "抖音", "wechat_channels": "视频号", "youtube": "YouTube", "toutiao": "今日头条", "kuaishou": "快手", "xiaohongshu": "小红书"}
 

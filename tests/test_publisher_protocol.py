@@ -25,7 +25,20 @@ def test_real_stdio_protocol_and_invalid_publish(tmp_path):
                 await session.initialize()
                 tools = await session.list_tools()
                 assert {tool.name for tool in tools.tools} == {
-                    "get_daily_package", "publish_daily", "get_publish_task", "list_publish_tasks", "sync_publish_result"}
+                    "get_daily_package", "publish_daily", "get_publish_task", "list_publish_tasks", "sync_publish_result",
+                    "preview_daily_update", "update_daily_work", "get_work_update", "sync_work_update", "list_work_updates",
+                    "preview_history_publish", "publish_history",
+                    "preview_work_replacement", "replace_daily_work", "get_work_replacement",
+                    "list_work_replacements", "sync_work_replacement", "resume_work_replacement"}
+                descriptors = {tool.name: tool for tool in tools.tools}
+                assert 'edition_id' in descriptors['preview_daily_update'].inputSchema['properties']
+                assert descriptors['replace_daily_work'].annotations.destructiveHint is True
+                assert descriptors['resume_work_replacement'].annotations.destructiveHint is True
+                assert 'retry_existing_delete' in descriptors['resume_work_replacement'].inputSchema['properties']
+                assert 'target_remote_id' in descriptors['preview_work_replacement'].inputSchema['properties']
+                assert 'target_remote_id' in descriptors['replace_daily_work'].inputSchema['properties']
+                result = await session.call_tool('preview_work_replacement', {'edition_id': '2026-09-23', 'platform': 'youtube'})
+                assert result.isError
                 result = await session.call_tool("get_daily_package", {})
                 assert not result.isError
                 assert json.loads(result.content[0].text)["package"] is None
@@ -43,6 +56,17 @@ def test_bilibili_receipt_needs_successful_structured_id():
     assert parse_receipt("上传成功 BV1234567890") is None
     assert parse_receipt(value.replace('"code":0', '"code":1')) is None
     assert parse_receipt(value + value.replace("BV1234567890", "BV0987654321")) is None
+
+
+def test_mcp_browser_update_does_not_nest_event_loops(monkeypatch):
+    import publisher_mcp
+    from publishing import updates
+    def browser_preview(*args):
+        async def read():
+            return {'preview_id':'checked','payload':{}}
+        return asyncio.run(read())
+    monkeypatch.setattr(updates,'preview',browser_preview)
+    assert asyncio.run(publisher_mcp.preview_daily_update('xiaohongshu')) == {'preview_id':'checked'}
 
 
 def test_browser_final_click_timeout_is_never_retried():

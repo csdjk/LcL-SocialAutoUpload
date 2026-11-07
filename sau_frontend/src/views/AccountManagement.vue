@@ -141,25 +141,18 @@
           />
         </el-form-item>
         <p v-if="dialogType === 'add'" class="browser-login-note">登录成功后，自动使用平台账号昵称。</p>
-        <el-form-item v-if="accountForm.platform && ['add', 'relogin'].includes(dialogType)" label="登录方式">
-          <el-radio-group v-model="loginMode" size="small" :disabled="sseConnecting || credentialBusy" @change="resetLoginMethod">
-            <el-radio-button value="browser">{{ accountForm.platform === 'YouTube' ? 'Google 授权' : '浏览器登录' }}</el-radio-button>
-            <el-radio-button v-if="!['YouTube', '今日头条'].includes(accountForm.platform) && (dialogType === 'add' || accountForm.platform === 'B站')" value="qr">界面扫码</el-radio-button>
-            <el-radio-button v-if="['抖音', 'B站'].includes(accountForm.platform)" value="import">导入登录态</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
         <YouTubeOAuthSetup v-if="dialogVisible && accountForm.platform === 'YouTube' && ['add', 'relogin'].includes(dialogType) && !sseConnecting && loginStatus !== '200'"
           @ready="youtubeConfigured = $event" @busy="credentialBusy = $event" />
-        <div v-if="accountForm.platform && accountForm.platform !== 'YouTube' && loginMode === 'browser' && ['add', 'relogin'].includes(dialogType) && !sseConnecting && !loginStatus" class="browser-login-intro">
-          <p>在普通 Edge 窗口完成登录，工具会自动验证并保存账号。</p>
-          <p class="browser-login-note">无需扩展。登录状态会保留，下次打开同一账号时继续使用；平台要求验证时再按提示登录。</p>
+        <div v-if="accountForm.platform && accountForm.platform !== 'YouTube' && loginMode === 'ego' && ['add', 'relogin'].includes(dialogType) && !sseConnecting && !loginStatus" class="browser-login-intro">
+          <p>在 Ego 中登录{{ accountForm.platform }}，完成后返回此处保存账号。</p>
+          <p class="browser-login-note">账号验证成功后保存登录状态。</p>
         </div>
         <DouyinCredentialImport v-if="dialogVisible && isCredentialImport && loginStatus !== '200'"
           :key="accountForm.platform" :platform="accountForm.platform === 'B站' ? 'bilibili' : 'douyin'"
           :name="accountForm.name" :account-id="dialogType !== 'add' ? Number(accountForm.id) : null"
           @busy="credentialBusy = $event" @imported="handleCredentialImported" />
         <!-- 二维码显示区域 -->
-        <div v-if="sseConnecting || loginStatus" class="qrcode-container" :class="{ 'browser-mode': loginMode === 'browser' }">
+        <div v-if="sseConnecting || loginStatus" class="qrcode-container" :class="{ 'browser-mode': ['browser', 'ego'].includes(loginMode) }">
           <div v-if="qrCodeData && !loginStatus" class="qrcode-wrapper">
             <p class="qrcode-tip">{{ loginProgress || '请使用对应平台APP扫码，并在手机上确认' }}</p>
             <img :src="qrCodeData" alt="登录二维码" class="qrcode-image" @error="failLogin('二维码图片加载失败，请重试')" />
@@ -175,17 +168,17 @@
           <div v-else-if="loginStatus === '500'" class="error-wrapper">
             <el-icon><CircleCloseFilled /></el-icon>
             <span>{{ loginError }}</span>
-            <el-button v-if="canContinueInBrowser" type="primary" @click="startOfficialLogin">
-              打开浏览器完成验证
-            </el-button>
           </div>
         </div>
       </el-form>
       <template #footer>
         <span class="dialog-footer">
           <el-button :disabled="credentialBusy" @click="dialogVisible = false">取消</el-button>
+          <el-button v-if="egoCanConfirm" type="primary" @click="confirmEgoLogin" :loading="egoConfirmBusy">
+            已登录，保存账号
+          </el-button>
           <el-button 
-            v-if="!canContinueInBrowser && !isCredentialImport"
+            v-if="!egoCanConfirm && !isCredentialImport"
             type="primary" 
             @click="submitAccountForm" 
             :loading="sseConnecting" 
@@ -326,23 +319,25 @@ const qrCodeData = ref('')
 const loginStatus = ref('')
 const loginError = ref('')
 const loginProgress = ref('')
-const loginMode = ref('browser')
+const loginMode = ref('ego')
 const loginStage = ref('')
+const egoConfirmationId = ref('')
+const egoConfirmBusy = ref(false)
+const egoCanConfirm = computed(() => loginMode.value === 'ego' && sseConnecting.value && loginStage.value === 'waiting_confirmation' && !!egoConfirmationId.value)
 const youtubeConfigured = ref(false)
 const loginButtonLabel = computed(() => {
   if (loginStatus.value === '200') return '已成功'
   if (sseConnecting.value) {
     if (['saving', 'verifying'].includes(loginStage.value)) return '正在保存'
-    return accountForm.platform === 'YouTube' ? '等待 Google 授权' : loginMode.value === 'browser' ? '等待浏览器登录' : qrCodeData.value ? '等待扫码' : '获取二维码'
+    return accountForm.platform === 'YouTube' ? '等待 Google 授权' : ['browser', 'ego'].includes(loginMode.value) ? '等待浏览器登录' : qrCodeData.value ? '等待扫码' : '获取二维码'
   }
   if (dialogType.value === 'edit') return '保存修改'
-  if (accountForm.platform === 'YouTube') return 'Google 授权'
-  return loginMode.value === 'browser' ? '打开 Edge 登录' : loginStatus.value === '500' ? '重试' : '确认'
+  if (accountForm.platform === 'YouTube') return '打开 Ego 授权'
+  return loginMode.value === 'ego' ? '打开 Ego 登录' : loginMode.value === 'browser' ? '打开 Edge 登录' : loginStatus.value === '500' ? '重试' : '确认'
 })
 const credentialBusy = ref(false)
 const isCredentialImport = computed(() => ['抖音', 'B站'].includes(accountForm.platform) && loginMode.value === 'import' && ['add', 'import', 'relogin'].includes(dialogType.value))
 const loginNeedsVerification = ref(false)
-const canContinueInBrowser = computed(() => loginMode.value !== 'browser' && accountForm.platform === '抖音' && loginStatus.value === '500' && loginNeedsVerification.value)
 
 // 添加账号
 const handleAddAccount = () => {
@@ -358,7 +353,7 @@ const handleAddAccount = () => {
   qrCodeData.value = ''
   loginStatus.value = ''
   resetLoginMethod()
-  loginMode.value = 'browser'
+  loginMode.value = 'ego'
   loginNeedsVerification.value = false
   dialogVisible.value = true
 }
@@ -483,7 +478,7 @@ const handleReLogin = (row) => {
   resetLoginMethod()
   dialogType.value = 'relogin'
   Object.assign(accountForm, { id: row.id, name: row.name, platform: row.platform, status: row.status })
-  loginMode.value = 'browser'
+  loginMode.value = 'ego'
   dialogVisible.value = true
 }
 
@@ -509,10 +504,24 @@ const resetLoginMethod = () => {
   loginError.value = ''
   loginProgress.value = ''
   loginNeedsVerification.value = false
+  loginStage.value = ''
+  egoConfirmationId.value = ''
+  egoConfirmBusy.value = false
 }
 const handleLoginPlatformChange = () => {
   resetLoginMethod()
-  loginMode.value = 'browser'
+  loginMode.value = 'ego'
+}
+
+const confirmEgoLogin = async () => {
+  if (!egoCanConfirm.value || egoConfirmBusy.value) return
+  egoConfirmBusy.value = true
+  try {
+    await http.post('/daily/login/ego/confirm', { confirmation_id: egoConfirmationId.value })
+  } catch (error) {
+    egoConfirmBusy.value = false
+    loginProgress.value = error?.message || '登录确认未成功，请检查页面后重试'
+  }
 }
 const handleCredentialImported = () => {
   loginStatus.value = '200'
@@ -527,6 +536,8 @@ const handleCredentialImported = () => {
 
 const failLogin = (message, details) => {
   closeSSEConnection()
+  egoConfirmationId.value = ''
+  egoConfirmBusy.value = false
   loginStatus.value = '500'
   loginError.value = message
   loginNeedsVerification.value = details?.status === 'verification_required'
@@ -535,14 +546,8 @@ const failLogin = (message, details) => {
 
 watch(dialogVisible, (visible) => {
   if (!visible) {
-    closeSSEConnection()
-    sseConnecting.value = false
-    qrCodeData.value = ''
-    loginStatus.value = ''
-    loginError.value = ''
-    loginProgress.value = ''
+    resetLoginMethod()
     credentialBusy.value = false
-    loginNeedsVerification.value = false
   }
 })
 
@@ -555,7 +560,9 @@ const connectSSE = (platform, name, mode = 'browser') => {
   loginMode.value = mode
   loginNeedsVerification.value = false
   loginStage.value = ''
-  loginProgress.value = mode === 'browser' ? '正在打开 Edge 登录窗口…' : '正在获取登录二维码…'
+  egoConfirmationId.value = ''
+  egoConfirmBusy.value = false
+  loginProgress.value = mode === 'ego' ? '正在打开 Ego 登录页面…' : mode === 'browser' ? '正在打开 Edge 登录窗口…' : '正在获取登录二维码…'
 
   const type = { '小红书': '1', '视频号': '2', '抖音': '3', '快手': '4', 'B站': '5', 'YouTube': '6', '今日头条': '7' }[platform]
   if (!type) {
@@ -571,7 +578,12 @@ const connectSSE = (platform, name, mode = 'browser') => {
         ? '请使用微信扫一扫，扫码后在手机上确认'
         : '请使用对应平台APP扫码，并在手机上确认'
     },
-    onStatus: ({ message, stage }) => { loginProgress.value = message; loginStage.value = stage || '' },
+    onStatus: ({ message, stage, confirmation_id }) => {
+      loginProgress.value = message
+      loginStage.value = stage || ''
+      if (confirmation_id) egoConfirmationId.value = confirmation_id
+      if (stage === 'waiting_confirmation') egoConfirmBusy.value = false
+    },
     onError: failLogin,
     onSuccess: () => {
       loginStream = null
@@ -585,12 +597,6 @@ const connectSSE = (platform, name, mode = 'browser') => {
       }, 800)
     }
   }, { mode })
-}
-
-const startOfficialLogin = () => {
-  accountFormRef.value.validate((valid) => {
-    if (valid) connectSSE(accountForm.platform, accountForm.name, 'browser')
-  })
 }
 
 // 提交账号表单

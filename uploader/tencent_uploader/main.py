@@ -112,31 +112,38 @@ def format_str_for_short_title(origin_title: str) -> str:
 
 
 async def cookie_auth(account_file):
-    """Only accept a rendered, authenticated page; a blank page is not success."""
+    """False only for a stable login page; unknown checks must preserve status."""
+    from .session import ChannelsSession, login_required
     account_file = _resolve_account_file(account_file)
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=True))
+        session = ChannelsSession(account_file)
         try:
-            context = await browser.new_context(storage_state=account_file)
-            context = await set_init_script(context)
+            context = await session.open(playwright, headless=True)
             page = await context.new_page()
             await page.goto(TENCENT_UPLOAD_URL, wait_until="domcontentloaded", timeout=30000)
             deadline = time.monotonic() + 20
+            login_since = None
             while time.monotonic() < deadline:
                 if await _is_tencent_login_completed(page):
+                    session.authenticated = True
                     tencent_logger.success(_msg("🥳", "cookie 有效"))
                     return True
-                if "login" in urlsplit(page.url).path or any(
-                    "open.weixin.qq.com/connect/qrconnect" in frame.url for frame in page.frames
-                ):
-                    return False
+                if login_required(page):
+                    if login_since is None:
+                        login_since = time.monotonic()
+                    if time.monotonic() - login_since >= 3:
+                        from .auth_diagnostics import record_login_failure
+                        await record_login_failure(page, 'account_check')
+                        return False
+                else:
+                    login_since = None
                 await asyncio.sleep(0.5)
-            return False
+            raise RuntimeError('视频号登录校验超时，未确认失效，已保留原登录状态')
         except Exception as exc:
-            tencent_logger.warning(_msg("😵", f"cookie 校验失败: {exc}"))
-            return False
+            tencent_logger.warning(_msg("😵", f"登录校验未完成，异常类型: {type(exc).__name__}"))
+            raise RuntimeError('视频号登录校验暂不可用或账号正在使用，已保留原登录状态，请稍后重试') from None
         finally:
-            await browser.close()
+            await session.close()
 
 
 async def _qrcode_image_data_url(page: Page, frame, image) -> str:

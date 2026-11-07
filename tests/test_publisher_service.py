@@ -27,6 +27,51 @@ def enqueue(case, platform="bilibili"):
     return result["jobs"][0]["task_id"]
 
 
+def test_today_excludes_xiaohongshu_without_removing_supported_platform(case):
+    bundle = service.today(cached=False)
+    assert "xiaohongshu" in daily.PLATFORMS
+    assert "xiaohongshu" not in bundle["status"]
+    assert "xiaohongshu" not in bundle["drafts"]
+    assert "xiaohongshu" not in bundle["publishable_platforms"]
+    assert set(bundle["status"]) == set(daily.DAILY_PLATFORMS)
+    with pytest.raises(ValueError, match="平台列表"):
+        service.publish_daily(bundle["selection_id"], ["xiaohongshu"])
+    assert service.list_tasks() == []
+
+
+@pytest.mark.parametrize("source", ["manual", "mcp", "automation"])
+def test_formal_daily_package_cannot_reserve_xiaohongshu(case, source):
+    with pytest.raises(ValueError, match="小红书已移出"):
+        daily.reserve(case.path, "xiaohongshu", source, queued=True)
+    assert service.list_tasks() == []
+
+
+@pytest.mark.parametrize('remote_state', ['published', 'processing', 'needs_action'])
+def test_youtube_cover_warning_preserves_actual_remote_state(case, remote_state):
+    from publishing import youtube_api
+    ident = enqueue(case)
+    warning = '自定义封面尚未确认完成，请在 Studio 核对。'
+    payload = {'_delivery': {'id': 'youtube_api', 'fingerprint': 'same-channel'}}
+    with daily._connection() as conn:
+        conn.execute('UPDATE attempts SET platform=?,state=?,remote_id=?,payload=?,evidence=? WHERE id=?',
+                     ('youtube', 'needs_action', 'abcdefghijk', json.dumps(payload),
+                      json.dumps({'warnings': [warning]}), ident))
+    result = {'status': 'found', 'state': remote_state, 'checked_at': '2026-09-27T13:00:00+00:00',
+              'note': '官方状态回读', 'privacy': 'private' if remote_state == 'needs_action' else 'public',
+              'processing': 'processing' if remote_state == 'processing' else 'succeeded'}
+    with patch.object(transports, 'resolve', return_value={'fingerprint': 'same-channel'}), \
+         patch.object(daily, '_account', return_value={'account_id': '123'}), \
+         patch.object(youtube_api, 'account_path', return_value=Path('unused-fixture')), \
+         patch.object(youtube_api, 'readback', return_value=result) as readback, \
+         patch.object(youtube_api, 'publish') as upload:
+        synced = service.sync_result(ident)['task']
+    assert synced['state'] == remote_state
+    assert synced['remote_id'] == 'abcdefghijk'
+    assert synced['evidence']['warnings'] == [warning]
+    readback.assert_called_once()
+    upload.assert_not_called()
+
+
 def test_mcp_and_manual_share_atomic_ledger(case):
     token = service.today(cached=False)["selection_id"]
     payload = daily.load_package(case.path)["platforms"]["bilibili"]

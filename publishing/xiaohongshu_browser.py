@@ -178,8 +178,14 @@ async def submit_once(page, progress):
     # Read the real button's label and box through CDP, then send one normal click.
     host = page.locator('xhs-publish-btn')
     await host.scroll_into_view_if_needed()
-    if await host.get_attribute('submit-disabled') != 'false':
-        raise ValueError('小红书发布按钮尚未就绪')
+    # Cover processing can finish after the visible preview is saved. Wait for
+    # the platform's own readiness flag; never force-enable the button.
+    for _ in range(40):
+        if await host.get_attribute('submit-disabled') == 'false':
+            break
+        await asyncio.sleep(.5)
+    else:
+        raise ValueError('小红书发布按钮等待20秒后仍未就绪')
     cdp = await page.context.new_cdp_session(page)
     try:
         tree = await cdp.send('DOM.getDocument', {'depth': -1, 'pierce': True})

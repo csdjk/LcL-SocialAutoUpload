@@ -11,21 +11,23 @@ python -m daily_publish today
 
 第一次启用前导入制作工作区的 `publications.json`，同日同平台同账号的旧记录会合并，已提交、审核中、结果不明及已发布均阻止再次投稿。账号换绑时仍检查旧账号记录。不会自动补发历史期次。
 
-新服务提供 `GET /daily/today`、`GET /daily/asset/<日期>/<版本>/<资源键>`、`PUT /daily/draft`、`POST /daily/submit`、`GET /daily/task/<任务ID>` 和 `POST /daily/reconcile`。任务在上传前先写入 SQLite，刷新页面可恢复；进入上传器后的异常或缺少远端回执的返回先标为“结果待核对”，需凭平台内容管理中的真实作品 ID、审核状态及链接核对。只有确认失败且没有远端作品的任务才允许重新提交。视频号只接受页面的手动提交，自动化入口拒绝视频号。
+新服务提供 `GET /daily/today`、`GET /daily/asset/<日期>/<版本>/<资源键>`、`PUT /daily/draft`、`POST /daily/submit`、`GET /daily/task/<任务ID>` 和 `POST /daily/reconcile`。任务在上传前先写入 SQLite，刷新页面可恢复；进入上传器后的异常或缺少远端回执的返回先标为“结果待核对”，需凭平台内容管理中的真实作品 ID、审核状态及链接核对。只有确认失败且没有远端作品的任务才允许重新提交。每日自动化通过统一服务提交已授权且检查通过的平台；结果未知的原任务保持禁止重复投稿。
 
-自动任务接入时，在合格资源包准备完毕后执行：
+## 每日六平台工作流
 
-```powershell
-python -m daily_publish submit --package "<当日 package.json>" --platforms bilibili,douyin
-```
+唯一日程是 Codex 的 `ai-06`：每天北京时间 06:00 制作并投稿。2026-10-03 起目标为抖音、B站、视频号、今日头条、YouTube、快手。小红书已从今日发布及每日自动投稿移除，账号、草稿与历史保留。发布工具内置自动排程继续关闭，避免两个调度器重复触发。
 
-该命令不会将上传器正常退出解释成公开发布。任务需继续回读平台内容管理并写入远端证据。B站时间定位评论、置顶及合集归类仍是视频投稿后的独立步骤。
+合格资源包准备完毕后，调用 `local-video-publisher.get_daily_package` 获取当日版本、`selection_id` 和 `publishable_platforms`。将 `douyin,bilibili,wechat_channels,toutiao,youtube,kuaishou` 与可投稿平台取交集，再调用 `publish_daily`，随后用 `get_publish_task` 和 `sync_publish_result` 回读原任务。不得用昨日包、重新入队或切换通道补救结果不明的投稿。
 
-上传器返回后命令会以非零状态提示“结果待核对”。从平台内容管理取得实际证据后，用 `python -m daily_publish reconcile --task-id <任务ID> --state processing|published|failed|unknown|needs_action --evidence-file <JSON>` 写回；JSON 至少包含 `platform`、`account_id`、带时区的 `checked_at` 和实际核对说明 `note`，审核中与已发布还需要真实 `remote_id`，已发布另需作品 `url`。确认失败还须记录 `remote_absent: true` 和实际核查依据，才能再次投稿；历史失败记录缺少这项证据时按结果待核对处理。
+交付器仍可生成兼容七平台的文案和九张封面，但每日只投稿上述六个目标，不自动补投小红书。小红书使用独立的 1080×1440 封面、1–20 字准确标题及不超过 10 个当日相关话题；标题过长应编辑，不能直接截断事实限定。上传后核对自定义封面与原图，再执行提交。
 
-## 切换门槛
+B站沿用 biliup 接口，默认不强制可选 AI 声明；YouTube 使用官方 Data API。抖音按现有可用授权和封面能力选 API 或浏览器；视频号、今日头条、快手使用现有浏览器通道。任务开始后固定通道；API 超时不能换浏览器重投。
 
-本地代码、资源包和页面可先验收；当前自动投稿任务暂时继续原路径。正式让 06:00 任务改用统一服务前，须核对 B站、抖音登录别名和目标账号、B站分区与 AI 声明能力、抖音 AI 声明、视频号有效的工具账号，以及三个平台各自一次符合投稿条件的真实回读。视频号仍只接受手动提交，不会因取消旧配置限制而开始自动发布。任一平台未完成时保留旧任务，不把上传器日志、按钮消失或页面跳转写成已发布。
+逐平台检查实际账号、登录态、封面、原任务与远端结果，故障只暂停对应平台。YouTube 视频已公开但自定义封面待处理时，仅补设原作品封面，禁止重复上传。分别报告已提交、审核中、已公开、需要处理及未执行，不能将工具退出或页面跳转视为公开发布。B站时间定位评论、置顶及合集归类仍是投稿后的独立步骤。
+
+## 原任务核对
+
+通过 `sync_publish_result` / 页面“同步后台结果”优先获取原账号的官方后台证据。人工核对接口 `python -m daily_publish reconcile --task-id <任务ID> --state processing|published|failed|unknown|needs_action --evidence-file <JSON>` 只更新原账本，不上传视频。证据至少包含 `platform`、`account_id`、带时区的 `checked_at` 和实际核对说明 `note`，审核中与已发布需要真实 `remote_id`，已发布另需作品 `url`。确认失败还须记录 `remote_absent: true` 和实际核查依据，才能再次提交；缺少证据保持结果待核对。
 
 ## 视频号工具账号与账本标识
 
